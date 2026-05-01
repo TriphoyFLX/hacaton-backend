@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String    @id @default(cuid())
+  email      String    @unique
+  username   String    @unique
+  password   String
+  birthDate  DateTime
+  agreedToTerms Boolean @default(false)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  posts      Post[]
+  soundToks  SoundTok[]
+
+  @@map("users")
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  content   String
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  media     Media[]
+
+  @@map("posts")
+}
+
+model Media {
+  id        String   @id @default(cuid())
+  type      MediaType
+  url       String
+  postId    String
+  createdAt DateTime @default(now())
+
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@map("media")
+}
+
+model SoundTok {
+  id          String   @id @default(cuid())
+  description String
+  videoUrl    String
+  authorId    String
+  likes       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@map("sound_toks")
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+  AUDIO
+}
