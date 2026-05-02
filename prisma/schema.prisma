@@ -26,6 +26,7 @@ model User {
   posts      Post[]
   soundToks  SoundTok[]
   comments   Comment[]
+  likes      Like[]
   sentMessages Message[] @relation("SentMessages")
   receivedMessages Message[] @relation("ReceivedMessages")
   chatUsers   ChatUser[]
@@ -73,6 +74,7 @@ model SoundTok {
 
   author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   comments    Comment[]
+  likesList   Like[]
 
   @@map("sound_toks")
 }
@@ -88,6 +90,19 @@ model Comment {
   soundTok  SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
 
   @@map("comments")
+}
+
+model Like {
+  id        String   @id @default(cuid())
+  userId    String
+  soundTokId String
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  soundTok  SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, soundTokId])
+  @@map("likes")
 }
 
 model Chat {

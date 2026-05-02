@@ -395,6 +395,8 @@ app.post('/api/soundtok', upload.single('video'), async (req, res) => {
 // Get all SoundToks
 app.get('/api/soundtok', async (req, res) => {
   try {
+    const userId = getUserFromToken(req.headers.authorization);
+    
     const soundToks = await prisma.soundTok.findMany({
       include: {
         author: {
@@ -402,14 +404,26 @@ app.get('/api/soundtok', async (req, res) => {
             id: true,
             username: true
           }
-        }
+        },
+        likesList: userId ? {
+          where: {
+            userId: userId
+          }
+        } : false
       },
       orderBy: {
         createdAt: 'desc'
       }
     });
 
-    res.json(soundToks);
+    // Add isLiked field to each SoundTok
+    const soundToksWithIsLiked = soundToks.map(soundTok => ({
+      ...soundTok,
+      isLiked: userId ? soundTok.likesList.length > 0 : false,
+      likesList: undefined // Remove likesList from response
+    }));
+
+    res.json(soundToksWithIsLiked);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch SoundToks' });
@@ -423,6 +437,28 @@ app.post('/api/soundtok/:id/like', async (req, res) => {
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+
+    // Check if user already liked this SoundTok
+    const existingLike = await prisma.like.findUnique({
+      where: {
+        userId_soundTokId: {
+          userId: userId,
+          soundTokId: req.params.id
+        }
+      }
+    });
+
+    if (existingLike) {
+      return res.status(400).json({ error: 'Already liked' });
+    }
+
+    // Create the like and update the count
+    await prisma.like.create({
+      data: {
+        userId: userId,
+        soundTokId: req.params.id
+      }
+    });
 
     const soundTok = await prisma.soundTok.update({
       where: { id: req.params.id },
