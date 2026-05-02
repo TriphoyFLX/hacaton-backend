@@ -115,6 +115,8 @@ app.post('/api/auth/register', async (req, res) => {
       process.env.JWT_SECRET || 'secret',
       { expiresIn: '7d' }
     );
+
+    res.status(201).json({ user, token });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Registration failed' });
@@ -1640,7 +1642,7 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req: AuthenticatedR
   }
 });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5002;
 app.listen(PORT, () => {
   console.log(`Server on http://localhost:${PORT}`);
 });
