@@ -25,9 +25,13 @@ model User {
 
   posts      Post[]
   soundToks  SoundTok[]
+  comments   Comment[]
   sentMessages Message[] @relation("SentMessages")
   receivedMessages Message[] @relation("ReceivedMessages")
   chatUsers   ChatUser[]
+  createdBattles Battle[] @relation("CreatedBattles")
+  battleParticipants BattleParticipant[]
+  battleRecordings BattleRecording[]
 
   @@map("users")
 }
@@ -63,12 +67,27 @@ model SoundTok {
   videoUrl    String
   authorId    String
   likes       Int      @default(0)
+  commentsCount Int    @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  comments    Comment[]
 
   @@map("sound_toks")
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  text      String
+  authorId  String
+  soundTokId String
+  createdAt DateTime @default(now())
+
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  soundTok  SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
+
+  @@map("comments")
 }
 
 model Chat {
@@ -114,4 +133,99 @@ enum MediaType {
   IMAGE
   VIDEO
   AUDIO
+}
+
+enum BattleStatus {
+  WAITING
+  INVITING
+  SELECTING_BEAT
+  USER1_TURN
+  USER2_TURN
+  JUDGING
+  FINISHED
+  CANCELLED
+}
+
+enum BattleParticipantRole {
+  CREATOR
+  OPPONENT
+  JUDGE
+}
+
+enum BattleWinner {
+  USER1
+  USER2
+  DRAW
+}
+
+model Battle {
+  id          String       @id @default(cuid())
+  title       String
+  description String?
+  status      BattleStatus @default(WAITING)
+  creatorId   String
+  beatUrl     String?
+  beatName    String?
+  winner      BattleWinner?
+  judgedBy    String?      // ID of AI judge or user judge
+  judgedAt    DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  creator     User                 @relation("CreatedBattles", fields: [creatorId], references: [id], onDelete: Cascade)
+  participants BattleParticipant[]
+  recordings  BattleRecording[]
+
+  @@map("battles")
+}
+
+model BattleParticipant {
+  id         String               @id @default(cuid())
+  battleId   String
+  userId     String
+  role       BattleParticipantRole
+  acceptedAt DateTime?
+  createdAt  DateTime             @default(now())
+
+  battle     Battle @relation(fields: [battleId], references: [id], onDelete: Cascade)
+  user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([battleId, userId, role])
+  @@map("battle_participants")
+}
+
+model BattleRecording {
+  id          String   @id @default(cuid())
+  battleId    String
+  userId      String
+  voiceUrl    String
+  voiceBlob   Bytes?   // Store audio blob directly in DB
+  beatUrl     String
+  duration    Float    // in seconds
+  recordingQuality String @default("medium") // low, medium, high
+  createdAt   DateTime @default(now())
+
+  battle      Battle @relation(fields: [battleId], references: [id], onDelete: Cascade)
+  user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("battle_recordings")
+}
+
+model BattleJudge {
+  id              String   @id @default(cuid())
+  battleId        String   @unique
+  judgeType       String   @default("ai") // ai, user
+  user1Flow       Float    @default(0)
+  user1Lyrics     Float    @default(0)
+  user1Delivery   Float    @default(0)
+  user2Flow       Float    @default(0)
+  user2Lyrics     Float    @default(0)
+  user2Delivery   Float    @default(0)
+  user1Total      Float    @default(0)
+  user2Total      Float    @default(0)
+  feedback        String?  // AI feedback text
+  confidence      Float?   // AI confidence score
+  createdAt       DateTime @default(now())
+
+  @@map("battle_judges")
 }

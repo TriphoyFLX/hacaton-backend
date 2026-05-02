@@ -36,13 +36,22 @@ const upload = multer({
     fileSize: 50 * 1024 * 1024 // 50MB limit
   },
   fileFilter: (req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
-    const allowedTypes = /jpeg|jpg|png|gif|mp4|mov|avi|mp3|wav/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
+    // Разрешаем изображения, видео и аудио файлы
+    const allowedImageTypes = /jpeg|jpg|png|gif/;
+    const allowedVideoTypes = /mp4|mov|avi/;
+    const allowedAudioTypes = /mp3|wav|mpeg|audio\/mpeg|audio\/wav|audio\/mp3/;
+    
+    const extname = file.originalname.toLowerCase();
+    const mimetype = file.mimetype.toLowerCase();
+    
+    const isImage = allowedImageTypes.test(path.extname(extname)) || mimetype.includes('image/');
+    const isVideo = allowedVideoTypes.test(path.extname(extname)) || mimetype.includes('video/');
+    const isAudio = allowedAudioTypes.test(path.extname(extname)) || mimetype.includes('audio/');
 
-    if (extname && mimetype) {
+    if (isImage || isVideo || isAudio) {
       return cb(null, true);
     } else {
+      console.log('Debug: Rejected file:', file.originalname, 'mimetype:', file.mimetype);
       cb(new Error('Invalid file type'));
     }
   }
@@ -210,6 +219,50 @@ const isAdmin = async (authHeader?: string) => {
     return user?.role === 'ADMIN';
   } catch {
     return false;
+  }
+};
+
+// Extended Request interface
+interface AuthenticatedRequest extends Request {
+  user?: {
+    id: string;
+    username: string;
+    email: string;
+    role: string;
+    createdAt: Date;
+  };
+}
+
+// Authentication middleware
+const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as { userId: string; role: string };
+    
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        role: true,
+        createdAt: true
+      }
+    });
+
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid token' });
   }
 };
 
@@ -384,6 +437,80 @@ app.post('/api/soundtok/:id/like', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to like SoundTok' });
+  }
+});
+
+// Get comments for SoundTok
+app.get('/api/soundtok/:id/comments', async (req, res) => {
+  try {
+    const comments = await prisma.comment.findMany({
+      where: {
+        soundTokId: req.params.id
+      },
+      include: {
+        author: {
+          select: {
+            id: true,
+            username: true
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'asc'
+      }
+    });
+
+    res.json(comments);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
+// Create comment for SoundTok
+app.post('/api/soundtok/:id/comments', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { text } = req.body;
+
+    if (!text || text.trim() === '') {
+      return res.status(400).json({ error: 'Comment text required' });
+    }
+
+    const comment = await prisma.comment.create({
+      data: {
+        text,
+        authorId: userId,
+        soundTokId: req.params.id
+      },
+      include: {
+        author: {
+          select: {
+            id: true,
+            username: true
+          }
+        }
+      }
+    });
+
+    // Increment comments count
+    await prisma.soundTok.update({
+      where: { id: req.params.id },
+      data: {
+        commentsCount: {
+          increment: 1
+        }
+      }
+    });
+
+    res.status(201).json(comment);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to create comment' });
   }
 });
 
@@ -813,6 +940,667 @@ app.delete('/api/admin/soundtoks/:id', requireAdmin, async (req, res) => {
     res.json({ message: 'SoundTok deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete soundtok' });
+  }
+});
+
+// Battle System API
+
+// Get available users for battle invitations
+app.get('/api/users/available', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const currentUserId = req.user.id;
+    
+    const users = await prisma.user.findMany({
+      where: {
+        id: { not: currentUserId },
+        role: 'USER'
+      },
+      select: {
+        id: true,
+        username: true,
+        createdAt: true,
+        _count: {
+          select: {
+            createdBattles: true,
+            battleParticipants: true
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+    
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching available users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Create new battle
+app.post('/api/battles', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const { title, description, opponentId } = req.body;
+    const creatorId = req.user.id;
+    
+    if (!title || !opponentId) {
+      return res.status(400).json({ error: 'Title and opponent are required' });
+    }
+    
+    if (opponentId === creatorId) {
+      return res.status(400).json({ error: 'Cannot invite yourself' });
+    }
+    
+    // Check if opponent exists
+    const opponent = await prisma.user.findUnique({
+      where: { id: opponentId }
+    });
+    
+    if (!opponent) {
+      return res.status(404).json({ error: 'Opponent not found' });
+    }
+    
+    // Create battle and participants
+    const battle = await prisma.battle.create({
+      data: {
+        title,
+        description,
+        creatorId,
+        status: 'INVITING',
+        participants: {
+          create: [
+            {
+              userId: creatorId,
+              role: 'CREATOR',
+              acceptedAt: new Date()
+            },
+            {
+              userId: opponentId,
+              role: 'OPPONENT'
+            }
+          ]
+        }
+      },
+      include: {
+        participants: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true
+              }
+            }
+          }
+        },
+        creator: {
+          select: {
+            id: true,
+            username: true
+          }
+        }
+      }
+    });
+    
+    res.status(201).json(battle);
+  } catch (error) {
+    console.error('Error creating battle:', error);
+    res.status(500).json({ error: 'Failed to create battle' });
+  }
+});
+
+// Get user's battles
+app.get('/api/battles', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const userId = req.user.id;
+    
+    const battles = await prisma.battle.findMany({
+      where: {
+        OR: [
+          { creatorId: userId },
+          {
+            participants: {
+              some: {
+                userId: userId
+              }
+            }
+          }
+        ]
+      },
+      include: {
+        creator: {
+          select: {
+            id: true,
+            username: true
+          }
+        },
+        participants: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true
+              }
+            }
+          }
+        },
+        recordings: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true
+              }
+            }
+          }
+        },
+        _count: {
+          select: {
+            recordings: true
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+    
+    res.json(battles);
+  } catch (error) {
+    console.error('Error fetching battles:', error);
+    res.status(500).json({ error: 'Failed to fetch battles' });
+  }
+});
+
+// Get pending battle invitations
+app.get('/api/battles/invitations', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const userId = req.user.id;
+    
+    const invitations = await prisma.battle.findMany({
+      where: {
+        status: 'INVITING',
+        creatorId: { not: userId }, // Исключаем создателей баттлов
+        participants: {
+          some: {
+            userId: userId,
+            role: 'OPPONENT',
+            acceptedAt: null
+          }
+        }
+      },
+      include: {
+        creator: {
+          select: {
+            id: true,
+            username: true
+          }
+        },
+        participants: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true
+              }
+            }
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    });
+    
+    res.json(invitations);
+  } catch (error) {
+    console.error('Error fetching invitations:', error);
+    res.status(500).json({ error: 'Failed to fetch invitations' });
+  }
+});
+
+// Accept/decline battle invitation
+app.patch('/api/battles/:id/respond', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const battleId = req.params.id;
+    const userId = req.user.id;
+    const { accept } = req.body;
+    
+    console.log(`Looking for participant: battleId=${battleId}, userId=${userId}, role=OPPONENT`);
+    
+    const participant = await prisma.battleParticipant.findFirst({
+      where: {
+        battleId,
+        userId,
+        role: 'OPPONENT'
+      }
+    });
+    
+    console.log(`Found participant:`, participant);
+    
+    if (!participant) {
+      // Для диагностики выведем всех участников этого баттла
+      const allParticipants = await prisma.battleParticipant.findMany({
+        where: { battleId },
+        include: { user: true }
+      });
+      console.log(`All participants for battle ${battleId}:`, allParticipants);
+      return res.status(404).json({ error: 'Battle invitation not found' });
+    }
+    
+    if (accept) {
+      await prisma.battleParticipant.update({
+        where: { id: participant.id },
+        data: {
+          acceptedAt: new Date()
+        }
+      });
+      
+      await prisma.battle.update({
+        where: { id: battleId },
+        data: {
+          status: 'USER1_TURN'
+        }
+      });
+    } else {
+      await prisma.battle.update({
+        where: { id: battleId },
+        data: {
+          status: 'CANCELLED'
+        }
+      });
+    }
+    
+    res.json({ message: accept ? 'Battle accepted' : 'Battle declined' });
+  } catch (error) {
+    console.error('Error responding to battle:', error);
+    res.status(500).json({ error: 'Failed to respond to battle' });
+  }
+});
+
+// Update battle beat
+app.patch('/api/battles/:id/beat', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    const battleId = req.params.id;
+    const { beatUrl, beatName } = req.body;
+    
+    const battle = await prisma.battle.findUnique({
+      where: { id: battleId }
+    });
+    
+    if (!battle) {
+      return res.status(404).json({ error: 'Battle not found' });
+    }
+    
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (battle.creatorId !== req.user.id) {
+      return res.status(403).json({ error: 'Only battle creator can update beat' });
+    }
+    
+    // Бит может загружать только создатель, когда статус INVITING или SELECTING_BEAT
+    if (battle.status !== 'INVITING' && battle.status !== 'SELECTING_BEAT') {
+      return res.status(403).json({ error: 'Battle is not in beat selection phase' });
+    }
+    
+    await prisma.battle.update({
+      where: { id: battleId },
+      data: {
+        beatUrl,
+        beatName
+      }
+    });
+    
+    res.json({ message: 'Beat updated successfully' });
+  } catch (error) {
+    console.error('Error updating battle beat:', error);
+    res.status(500).json({ error: 'Failed to update beat' });
+  }
+});
+
+// Update battle status
+app.patch('/api/battles/:id/status', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    const battleId = req.params.id;
+    const { status } = req.body;
+    
+    const battle = await prisma.battle.findUnique({
+      where: { id: battleId }
+    });
+    
+    if (!battle) {
+      return res.status(404).json({ error: 'Battle not found' });
+    }
+    
+    // Проверяем что пользователь является участником баттла
+    const participant = await prisma.battleParticipant.findFirst({
+      where: {
+        battleId,
+        userId: req.user.id
+      }
+    });
+    
+    if (!participant && battle.creatorId !== req.user.id) {
+      return res.status(403).json({ error: 'You are not a participant in this battle' });
+    }
+    
+    await prisma.battle.update({
+      where: { id: battleId },
+      data: { status }
+    });
+    
+    res.json({ message: 'Battle status updated successfully' });
+  } catch (error) {
+    console.error('Error updating battle status:', error);
+    res.status(500).json({ error: 'Failed to update battle status' });
+  }
+});
+
+// Upload beat file
+app.post('/api/upload/beat', authenticateToken, upload.single('beat'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No beat file uploaded' });
+    }
+
+    const fileUrl = `http://localhost:5002/uploads/${req.file.filename}`;
+    console.log('Debug: Beat uploaded with URL:', fileUrl);
+    res.json({ url: fileUrl });
+  } catch (error) {
+    console.error('Error uploading beat:', error);
+    res.status(500).json({ error: 'Failed to upload beat' });
+  }
+});
+
+// Upload recording
+app.post('/api/upload/recording', authenticateToken, upload.single('audio'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const fileUrl = `/uploads/${req.file.filename}`;
+    res.json({ url: fileUrl });
+  } catch (error) {
+    console.error('Error uploading recording:', error);
+    res.status(500).json({ error: 'Failed to upload recording' });
+  }
+});
+
+// Get battle recordings
+app.get('/api/battles/:id/recordings', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const battleId = req.params.id;
+    
+    const battle = await prisma.battle.findUnique({
+      where: { id: battleId },
+      include: {
+        recordings: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true,
+                email: true
+              }
+            }
+          },
+          orderBy: {
+            createdAt: 'asc'
+          }
+        }
+      }
+    });
+
+    if (!battle) {
+      return res.status(404).json({ error: 'Battle not found' });
+    }
+
+    // Check if user is participant
+    const participant = await prisma.battleParticipant.findFirst({
+      where: {
+        battleId,
+        userId: req.user.id
+      }
+    });
+
+    if (!participant && battle.creatorId !== req.user.id) {
+      return res.status(403).json({ error: 'You are not a participant in this battle' });
+    }
+
+    res.json(battle.recordings);
+  } catch (error) {
+    console.error('Error getting battle recordings:', error);
+    res.status(500).json({ error: 'Failed to get battle recordings' });
+  }
+});
+
+// Save battle recording
+app.post('/api/battles/:id/recordings', authenticateToken, upload.single('audio'), async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const battleId = req.params.id;
+    const userId = req.user.id;
+    const { beatUrl, duration, recordingQuality } = req.body;
+    
+    if (!req.file) {
+      return res.status(400).json({ error: 'Audio file is required' });
+    }
+    
+    const voiceUrl = `/uploads/${req.file.filename}`;
+    
+    // Check if user is participant
+    const participant = await prisma.battleParticipant.findFirst({
+      where: {
+        battleId,
+        userId
+      }
+    });
+    
+    if (!participant) {
+      return res.status(403).json({ error: 'Not a battle participant' });
+    }
+    
+    // Read file as buffer and store as blob
+    const fileBuffer = fs.readFileSync(path.join(uploadsDir, req.file.filename));
+    
+    const recording = await prisma.battleRecording.create({
+      data: {
+        battleId,
+        userId,
+        voiceUrl,
+        voiceBlob: fileBuffer, // Store audio blob directly in DB
+        beatUrl,
+        duration: parseFloat(duration),
+        recordingQuality: recordingQuality || 'medium'
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            username: true
+          }
+        }
+      }
+    });
+    
+    // Update battle status if both recordings are done
+    const recordings = await prisma.battleRecording.findMany({
+      where: { battleId },
+      distinct: ['userId']
+    });
+    
+    if (recordings.length === 2) {
+      await prisma.battle.update({
+        where: { id: battleId },
+        data: {
+          status: 'JUDGING'
+        }
+      });
+    }
+    
+    res.status(201).json(recording);
+  } catch (error) {
+    console.error('Error saving recording:', error);
+    res.status(500).json({ error: 'Failed to save recording' });
+  }
+});
+
+// Get voice blob from database
+app.get('/api/battles/:id/recordings/:recordingId/voice-blob', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    
+    const recordingId = req.params.recordingId;
+    
+    const recording = await prisma.battleRecording.findFirst({
+      where: {
+        id: recordingId,
+        // Optional: Check if user has access to this recording
+      }
+    });
+    
+    if (!recording || !recording.voiceBlob) {
+      return res.status(404).json({ error: 'Voice blob not found' });
+    }
+    
+    // Set proper headers for audio file
+    res.setHeader('Content-Type', 'audio/webm');
+    res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+    
+    // Send the blob data
+    res.send(recording.voiceBlob);
+  } catch (error) {
+    console.error('Error getting voice blob:', error);
+    res.status(500).json({ error: 'Failed to get voice blob' });
+  }
+});
+
+// AI Judge evaluation
+app.post('/api/battles/:id/judge', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const battleId = req.params.id;
+    
+    const battle = await prisma.battle.findUnique({
+      where: { id: battleId },
+      include: {
+        recordings: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                username: true
+              }
+            }
+          }
+        }
+      }
+    });
+    
+    if (!battle) {
+      return res.status(404).json({ error: 'Battle not found' });
+    }
+    
+    if (battle.recordings.length !== 2) {
+      return res.status(400).json({ error: 'Battle must have 2 recordings for judging' });
+    }
+    
+    // AI Judge Logic (simplified version)
+    const user1Recording = battle.recordings[0];
+    const user2Recording = battle.recordings[1];
+    
+    // Simulate AI scoring with some randomness and duration-based logic
+    const generateScore = (duration: number, baseScore: number = 5) => {
+      const durationBonus = Math.min(duration / 30, 1) * 2; // Bonus for longer recordings
+      const randomFactor = (Math.random() - 0.5) * 2; // Random variation
+      return Math.max(1, Math.min(10, baseScore + durationBonus + randomFactor));
+    };
+    
+    const user1Flow = generateScore(user1Recording.duration, 6);
+    const user1Lyrics = generateScore(user1Recording.duration, 5.5);
+    const user1Delivery = generateScore(user1Recording.duration, 5.8);
+    const user2Flow = generateScore(user2Recording.duration, 5.5);
+    const user2Lyrics = generateScore(user2Recording.duration, 6);
+    const user2Delivery = generateScore(user2Recording.duration, 5.2);
+    
+    const user1Total = user1Flow + user1Lyrics + user1Delivery;
+    const user2Total = user2Flow + user2Lyrics + user2Delivery;
+    
+    let winner: 'USER1' | 'USER2' | 'DRAW';
+    if (user1Total > user2Total) winner = 'USER1';
+    else if (user2Total > user1Total) winner = 'USER2';
+    else winner = 'DRAW';
+    
+    // Save judge results
+    const judge = await prisma.battleJudge.create({
+      data: {
+        battleId,
+        judgeType: 'ai',
+        user1Flow,
+        user1Lyrics,
+        user1Delivery,
+        user2Flow,
+        user2Lyrics,
+        user2Delivery,
+        user1Total,
+        user2Total,
+        feedback: `AI Analysis: ${winner === 'DRAW' ? 'Even match with good performances from both sides.' : winner === 'USER1' ? user1Recording.user.username + ' showed stronger flow and delivery.' : user2Recording.user.username + ' had better lyrical content and rhythm.'}`,
+        confidence: 0.75 + Math.random() * 0.2
+      }
+    });
+    
+    // Update battle status
+    await prisma.battle.update({
+      where: { id: battleId },
+      data: {
+        status: 'FINISHED',
+        winner,
+        judgedBy: 'ai-judge',
+        judgedAt: new Date()
+      }
+    });
+    
+    res.json({
+      judge,
+      winner,
+      user1Total,
+      user2Total
+    });
+  } catch (error) {
+    console.error('Error judging battle:', error);
+    res.status(500).json({ error: 'Failed to judge battle' });
   }
 });
 
