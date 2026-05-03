@@ -9,7 +9,8 @@ import path from 'path';
 import fs from 'fs';
 
 dotenv.config();
-
+console.log("ENV LOADED:", process.env.SUNO_API_KEY);
+console.log('RAW ENV FILE:\n', fs.readFileSync('.env', 'utf8'));
 const app = express();
 const prisma = new PrismaClient();
 
@@ -56,11 +57,9 @@ const upload = multer({
     }
   }
 });
-
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
-  credentials: true,
-}));
+console.log('SUNO KEY:', process.env.SUNO_API_KEY);
+app.use(cors());
+console.log('CWD:', process.cwd());
 
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
@@ -1639,6 +1638,99 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req: AuthenticatedR
   } catch (error) {
     console.error('Error judging battle:', error);
     res.status(500).json({ error: 'Failed to judge battle' });
+  }
+});
+
+// Suno API endpoints
+app.post('/api/generate-music', async (req, res) => {
+  try {
+    const { title, tags, prompt, translate_input, model } = req.body;
+    
+    if (!title || !tags) {
+      return res.status(400).json({ error: 'Title and tags are required' });
+    }
+
+    const apiKey = process.env.SUNO_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Suno API key not configured' });
+    }
+
+    const requestBody = {
+      title,
+      tags,
+      ...(prompt && { prompt }),
+      translate_input: translate_input || true,
+      model: model || 'v5.5'
+    };
+
+    const response = await fetch('https://api.gen-api.ru/api/v1/networks/suno', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Suno API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('Generation error:', error);
+    res.status(500).json({ 
+      error: error instanceof Error ? error.message : 'Failed to generate music' 
+    });
+  }
+});
+
+app.get('/api/check-generation/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    console.log('CHECKING GENERATION ID:', id);
+    
+    if (!id) {
+      return res.status(400).json({ error: 'Generation ID is required' });
+    }
+
+    const apiKey = process.env.SUNO_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Suno API key not configured' });
+    }
+
+    const url = `https://api.gen-api.ru/api/v1/request/get/${id}`;
+    console.log('POLLING URL:', url);
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      }
+    });
+
+    console.log('POLLING RESPONSE STATUS:', response.status);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('POLLING ERROR DETAILS:', errorText);
+      throw new Error(`Polling error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    console.log('GENERATION RESPONSE:', data);
+
+    res.json(data);
+  } catch (error) {
+    console.error('Polling error:', error);
+    res.status(500).json({ 
+      error: error instanceof Error ? error.message : 'Failed to check generation' 
+    });
   }
 });
 
