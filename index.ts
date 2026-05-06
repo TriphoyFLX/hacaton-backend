@@ -237,13 +237,17 @@ interface AuthenticatedRequest extends Request {
 // Authentication middleware
 const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any) => {
   const authHeader = req.headers.authorization;
+  console.log(`Auth middleware - ${req.method} ${req.path} - auth header:`, authHeader ? 'present' : 'missing');
+  
   if (!authHeader) {
+    console.log('Auth middleware: No token provided');
     return res.status(401).json({ error: 'No token provided' });
   }
 
   const token = authHeader.replace('Bearer ', '');
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as { userId: string; role: string };
+    console.log('Auth middleware: Token decoded, userId:', decoded.userId);
     
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
@@ -257,12 +261,15 @@ const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any)
     });
 
     if (!user) {
+      console.log('Auth middleware: User not found for id:', decoded.userId);
       return res.status(401).json({ error: 'User not found' });
     }
 
+    console.log('Auth middleware: User authenticated:', user.username);
     req.user = user;
     next();
   } catch (error) {
+    console.log('Auth middleware: Invalid token -', error instanceof Error ? error.message : 'unknown error');
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -358,7 +365,13 @@ app.get('/api/posts', async (req, res) => {
 // Create SoundTok (short video)
 app.post('/api/soundtok', upload.single('video'), async (req, res) => {
   try {
+    console.log('SoundTok upload - headers:', req.headers.authorization ? 'Auth header present' : 'No auth header');
+    console.log('SoundTok upload - body:', req.body);
+    console.log('SoundTok upload - file:', req.file);
+    
     const userId = getUserFromToken(req.headers.authorization);
+    console.log('SoundTok upload - userId:', userId);
+    
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -388,8 +401,12 @@ app.post('/api/soundtok', upload.single('video'), async (req, res) => {
 
     res.status(201).json(soundTok);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to create SoundTok' });
+    console.error('SoundTok upload error:', error);
+    if (error instanceof Error) {
+      console.error('Error message:', error.message);
+      console.error('Error stack:', error.stack);
+    }
+    res.status(500).json({ error: 'Failed to create SoundTok', details: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
 

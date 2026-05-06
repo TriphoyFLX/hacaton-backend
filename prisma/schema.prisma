@@ -12,6 +12,12 @@ enum Role {
   ADMIN
 }
 
+enum MessageStatus {
+  SENT
+  DELIVERED
+  READ
+}
+
 model User {
   id         String    @id @default(cuid())
   email      String    @unique
@@ -20,6 +26,12 @@ model User {
   birthDate  DateTime
   agreedToTerms Boolean @default(false)
   role       Role      @default(USER)
+  
+  // Profile fields
+  displayName String?
+  avatar      String?
+  bio         String?   @db.Text
+  
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
@@ -122,12 +134,22 @@ model Message {
   senderId  String
   receiverId String
   chatId    String
+  
+  // For deduplication and status tracking
+  clientMessageId String?   // ID generated on client to prevent duplicates
+  status      MessageStatus @default(SENT)
+  readAt      DateTime?
+  
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   sender    User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
   receiver  User     @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
   chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
+  @@unique([clientMessageId, chatId]) // Prevent duplicate messages from same client
+  @@index([chatId, createdAt])         // Optimize message history queries
+  @@index([senderId, status])          // Optimize status update queries
   @@map("messages")
 }
 
