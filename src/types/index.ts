@@ -1,4 +1,5 @@
 // Shared types for the application
+import { Request } from 'express';
 
 export interface AuthenticatedRequest extends Request {
   user?: {

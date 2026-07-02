@@ -55,7 +55,11 @@ npm run dev
 
 The server will run on http://localhost:5002
 
-## API Endpoints
+## Profile API
 
-- `GET /` - Welcome message
-- `GET /api/health` - Health check endpoint
+- `GET /api/profile` — текущий профиль (auth)
+- `PATCH /api/profile` — обновить имя и bio (auth)
+- `POST /api/profile/avatar` — загрузить аватар, поле `avatar` (auth)
+- `DELETE /api/profile/avatar` — удалить аватар (auth)
+- `GET /api/profile/search?q=...&limit=10` — поиск пользователей
+- `GET /api/profile/:username` — публичный профиль

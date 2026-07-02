@@ -7,10 +7,9 @@ import dotenv from 'dotenv';
 import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { createProfileRouter } from './src/routes/profileRoutes';
 
 dotenv.config();
-console.log("ENV LOADED:", process.env.SUNO_API_KEY);
-console.log('RAW ENV FILE:\n', fs.readFileSync('.env', 'utf8'));
 const app = express();
 const prisma = new PrismaClient();
 
@@ -57,9 +56,7 @@ const upload = multer({
     }
   }
 });
-console.log('SUNO KEY:', process.env.SUNO_API_KEY);
 app.use(cors());
-console.log('CWD:', process.cwd());
 
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
@@ -180,7 +177,18 @@ app.get('/api/auth/me', async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
-      select: { id: true, email: true, username: true, birthDate: true, createdAt: true }
+      select: {
+        id: true,
+        email: true,
+        username: true,
+        displayName: true,
+        avatar: true,
+        bio: true,
+        birthDate: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true,
+      }
     });
 
     if (!user) {
@@ -281,6 +289,8 @@ const requireAdmin = async (req: any, res: any, next: any) => {
   }
   next();
 };
+
+app.use('/api/profile', createProfileRouter(authenticateToken, uploadsDir));
 
 // Create post with media
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
@@ -505,12 +515,14 @@ app.get('/api/soundtok/:id/comments', async (req, res) => {
         author: {
           select: {
             id: true,
-            username: true
+            username: true,
+            displayName: true,
+            avatar: true,
           }
         }
       },
       orderBy: {
-        createdAt: 'asc'
+        createdAt: 'desc'
       }
     });
 
@@ -545,23 +557,25 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
         author: {
           select: {
             id: true,
-            username: true
+            username: true,
+            displayName: true,
+            avatar: true,
           }
         }
       }
     });
 
-    // Increment comments count
-    await prisma.soundTok.update({
+    const updated = await prisma.soundTok.update({
       where: { id: req.params.id },
       data: {
         commentsCount: {
           increment: 1
         }
-      }
+      },
+      select: { commentsCount: true }
     });
 
-    res.status(201).json(comment);
+    res.status(201).json({ comment, commentsCount: updated.commentsCount });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to create comment' });
@@ -593,13 +607,15 @@ app.get('/api/search', async (req, res) => {
         where: {
           OR: [
             { username: { contains: q, mode: 'insensitive' } },
-            { email: { contains: q, mode: 'insensitive' } }
+            { displayName: { contains: q, mode: 'insensitive' } },
           ]
         },
         select: {
           id: true,
           username: true,
-          email: true,
+          displayName: true,
+          avatar: true,
+          bio: true,
           createdAt: true
         },
         take: 10

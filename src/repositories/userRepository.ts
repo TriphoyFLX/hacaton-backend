@@ -19,7 +19,7 @@ export interface UserProfile {
 export interface UpdateUserData {
   displayName?: string;
   bio?: string;
-  avatar?: string;
+  avatar?: string | null;
 }
 
 export class UserRepository {
@@ -128,6 +128,69 @@ export class UserRepository {
 
     const count = await prisma.user.count({ where });
     return count > 0;
+  }
+
+  /**
+   * Get user by username (case-insensitive)
+   */
+  async getUserByUsername(username: string): Promise<UserProfile | null> {
+    return prisma.user.findFirst({
+      where: {
+        username: { equals: username, mode: 'insensitive' },
+      },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        displayName: true,
+        avatar: true,
+        bio: true,
+        birthDate: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+  }
+
+  /**
+   * Get public stats for a user profile
+   */
+  async getUserStats(userId: string): Promise<{ posts: number; soundToks: number }> {
+    const [posts, soundToks] = await Promise.all([
+      prisma.post.count({ where: { authorId: userId } }),
+      prisma.soundTok.count({ where: { authorId: userId } }),
+    ]);
+
+    return { posts, soundToks };
+  }
+
+  /**
+   * Search users for profile discovery (no email in results)
+   */
+  async searchUsersForProfile(query: string, limit: number = 10): Promise<UserProfile[]> {
+    return prisma.user.findMany({
+      where: {
+        OR: [
+          { username: { contains: query, mode: 'insensitive' } },
+          { displayName: { contains: query, mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        displayName: true,
+        avatar: true,
+        bio: true,
+        birthDate: true,
+        role: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+      take: limit,
+      orderBy: { username: 'asc' },
+    });
   }
 
   /**

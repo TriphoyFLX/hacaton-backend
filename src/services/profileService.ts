@@ -117,6 +117,38 @@ export class ProfileService {
   }
 
   /**
+   * Search users for profile page
+   */
+  async searchUsersForProfile(query: string, limit: number = 10): Promise<UserProfile[]> {
+    if (!query.trim() || query.length < 2) {
+      return [];
+    }
+
+    return userRepository.searchUsersForProfile(query.trim(), limit);
+  }
+
+  /**
+   * Get public profile by id or username
+   */
+  async getPublicProfile(identifier: string): Promise<{
+    user: UserProfile;
+    stats: { posts: number; soundToks: number };
+  } | null> {
+    let user = await userRepository.getUserById(identifier);
+
+    if (!user) {
+      user = await userRepository.getUserByUsername(identifier);
+    }
+
+    if (!user) {
+      return null;
+    }
+
+    const stats = await userRepository.getUserStats(user.id);
+    return { user, stats };
+  }
+
+  /**
    * Search users
    */
   async searchUsers(query: string, limit: number = 10): Promise<UserProfile[]> {
