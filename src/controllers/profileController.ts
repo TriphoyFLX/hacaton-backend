@@ -12,13 +12,20 @@ export function createProfileHandlers(uploadsDir: string) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
-      const profile = await profileService.getProfile(req.user.id);
+      const profile = await profileService.getProfileWithStats(req.user.id, req.user.id);
 
       if (!profile) {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      res.json(serializeProfile(profile, { includeEmail: true, visibility: 'private' }));
+      res.json(
+        serializeProfile(profile.user, {
+          includeEmail: true,
+          visibility: 'private',
+          stats: profile.stats,
+          followStats: { ...profile.followStats, isFollowing: false },
+        })
+      );
     } catch (error) {
       console.error('getMyProfile error:', error);
       res.status(500).json({ error: 'Failed to fetch profile' });
@@ -28,7 +35,7 @@ export function createProfileHandlers(uploadsDir: string) {
   async function getPublicProfile(req: AuthenticatedRequest, res: Response) {
     try {
       const { identifier } = req.params;
-      const result = await profileService.getPublicProfile(identifier);
+      const result = await profileService.getPublicProfile(identifier, req.user?.id);
 
       if (!result) {
         return res.status(404).json({ error: 'User not found' });
@@ -38,6 +45,7 @@ export function createProfileHandlers(uploadsDir: string) {
         serializeProfile(result.user, {
           visibility: 'public',
           stats: result.stats,
+          followStats: result.followStats,
         })
       );
     } catch (error) {

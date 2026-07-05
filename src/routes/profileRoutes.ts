@@ -69,7 +69,7 @@ export function createProfileRouter(
   router.patch('/', authenticateToken, handlers.updateProfile);
   router.post('/avatar', authenticateToken, handleAvatarUpload, handlers.uploadAvatar);
   router.delete('/avatar', authenticateToken, handlers.deleteAvatar);
-  router.get('/:identifier', handlers.getPublicProfile);
+  router.get('/:identifier', optionalAuth, handlers.getPublicProfile);
 
   return router;
 }

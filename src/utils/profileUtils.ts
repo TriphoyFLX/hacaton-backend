@@ -28,6 +28,9 @@ export interface ProfileJson {
   updatedAt?: string;
   postsCount?: number;
   soundToksCount?: number;
+  followersCount?: number;
+  followingCount?: number;
+  isFollowing?: boolean;
 }
 
 export function serializeProfile(
@@ -46,6 +49,7 @@ export function serializeProfile(
   options: {
     includeEmail?: boolean;
     stats?: { posts: number; soundToks: number };
+    followStats?: { followersCount: number; followingCount: number; isFollowing?: boolean };
     visibility?: 'public' | 'private';
   } = {}
 ): ProfileJson {
@@ -79,6 +83,14 @@ export function serializeProfile(
   if (options.stats) {
     result.postsCount = options.stats.posts;
     result.soundToksCount = options.stats.soundToks;
+  }
+
+  if (options.followStats) {
+    result.followersCount = options.followStats.followersCount;
+    result.followingCount = options.followStats.followingCount;
+    if (options.followStats.isFollowing !== undefined) {
+      result.isFollowing = options.followStats.isFollowing;
+    }
   }
 
   return result;

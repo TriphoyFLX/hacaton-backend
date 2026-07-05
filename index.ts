@@ -8,6 +8,7 @@ import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { createProfileRouter } from './src/routes/profileRoutes';
+import { createFollowRouter } from './src/routes/followRoutes';
 
 dotenv.config();
 const app = express();
@@ -291,6 +292,7 @@ const requireAdmin = async (req: any, res: any, next: any) => {
 };
 
 app.use('/api/profile', createProfileRouter(authenticateToken, uploadsDir));
+app.use('/api/follows', createFollowRouter(authenticateToken));
 
 // Create post with media
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
@@ -424,6 +426,15 @@ app.post('/api/soundtok', upload.single('video'), async (req, res) => {
 app.get('/api/soundtok', async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
+
+    let followingIds = new Set<string>();
+    if (userId) {
+      const follows = await prisma.follow.findMany({
+        where: { followerId: userId },
+        select: { followingId: true },
+      });
+      followingIds = new Set(follows.map((f) => f.followingId));
+    }
     
     const soundToks = await prisma.soundTok.findMany({
       include: {
@@ -448,6 +459,7 @@ app.get('/api/soundtok', async (req, res) => {
     const soundToksWithIsLiked = soundToks.map(soundTok => ({
       ...soundTok,
       isLiked: userId ? soundTok.likesList.length > 0 : false,
+      authorIsFollowed: userId ? followingIds.has(soundTok.authorId) : false,
       likesList: undefined // Remove likesList from response
     }));
 
@@ -501,6 +513,56 @@ app.post('/api/soundtok/:id/like', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to like SoundTok' });
+  }
+});
+
+// Unlike SoundTok
+app.delete('/api/soundtok/:id/like', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const existingLike = await prisma.like.findUnique({
+      where: {
+        userId_soundTokId: {
+          userId,
+          soundTokId: req.params.id
+        }
+      }
+    });
+
+    if (!existingLike) {
+      const current = await prisma.soundTok.findUnique({
+        where: { id: req.params.id }
+      });
+      return res.json({ ...current, isLiked: false });
+    }
+
+    const [, soundTok] = await prisma.$transaction([
+      prisma.like.delete({
+        where: {
+          userId_soundTokId: {
+            userId,
+            soundTokId: req.params.id
+          }
+        }
+      }),
+      prisma.soundTok.update({
+        where: { id: req.params.id },
+        data: {
+          likes: {
+            decrement: 1
+          }
+        }
+      })
+    ]);
+
+    res.json({ ...soundTok, likes: Math.max(0, soundTok.likes), isLiked: false });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to unlike SoundTok' });
   }
 });
 

@@ -1,4 +1,5 @@
 import { userRepository, UpdateUserData, UserProfile } from '../repositories/userRepository';
+import { followService } from './followService';
 import { z } from 'zod';
 
 // Validation schemas
@@ -35,6 +36,18 @@ export class ProfileService {
    */
   async getProfile(userId: string): Promise<UserProfile | null> {
     return userRepository.getUserById(userId);
+  }
+
+  async getProfileWithStats(userId: string, viewerId?: string) {
+    const user = await userRepository.getUserById(userId);
+    if (!user) return null;
+
+    const [stats, followStats] = await Promise.all([
+      userRepository.getUserStats(userId),
+      followService.getFollowStats(userId, viewerId),
+    ]);
+
+    return { user, stats, followStats };
   }
 
   /**
@@ -130,9 +143,10 @@ export class ProfileService {
   /**
    * Get public profile by id or username
    */
-  async getPublicProfile(identifier: string): Promise<{
+  async getPublicProfile(identifier: string, viewerId?: string): Promise<{
     user: UserProfile;
     stats: { posts: number; soundToks: number };
+    followStats: { followersCount: number; followingCount: number; isFollowing: boolean };
   } | null> {
     let user = await userRepository.getUserById(identifier);
 
@@ -144,8 +158,12 @@ export class ProfileService {
       return null;
     }
 
-    const stats = await userRepository.getUserStats(user.id);
-    return { user, stats };
+    const [stats, followStats] = await Promise.all([
+      userRepository.getUserStats(user.id),
+      followService.getFollowStats(user.id, viewerId),
+    ]);
+
+    return { user, stats, followStats };
   }
 
   /**

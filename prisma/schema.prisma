@@ -46,6 +46,9 @@ model User {
   battleParticipants BattleParticipant[]
   battleRecordings BattleRecording[]
 
+  followers Follow[] @relation("UserFollowers")
+  following Follow[] @relation("UserFollowing")
+
   @@map("users")
 }
 
@@ -265,4 +268,18 @@ model BattleJudge {
   createdAt       DateTime @default(now())
 
   @@map("battle_judges")
+}
+
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String
+  followingId String
+  createdAt   DateTime @default(now())
+
+  follower  User @relation("UserFollowing", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("UserFollowers", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followingId])
+  @@map("follows")
 }
