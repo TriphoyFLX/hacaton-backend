@@ -2,7 +2,10 @@ import { Server as HttpServer } from 'http';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { chatService } from '../services/chatService';
+import { chatRepository } from '../repositories/chatRepository';
 import { profileService } from '../services/profileService';
+import { validateMessageContent } from '../utils/messageValidation';
+import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
 import {
   ServerToClientEvents,
   ClientToServerEvents,
@@ -21,6 +24,12 @@ const userSockets = new Map<string, Set<string>>();
 // Map of chatId -> Set of user IDs currently in chat
 const activeChatUsers = new Map<string, Set<string>>();
 
+let ioInstance: SocketIOServer | null = null;
+
+export function getIO(): SocketIOServer | null {
+  return ioInstance;
+}
+
 export function createSocketServer(httpServer: HttpServer): SocketIOServer {
   const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>(
     httpServer,
@@ -36,6 +45,8 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
       connectTimeout: 10000,
     }
   );
+
+  ioInstance = io;
 
   // Authentication middleware
   io.use(async (socket: AuthenticatedSocket, next) => {
@@ -77,8 +88,8 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     }
     userSockets.get(userId)!.add(socket.id);
 
-    // Broadcast online status to subscribed users
-    socket.broadcast.emit('user:online', { userId, isOnline: true });
+    // Notify subscribers about online status
+    io.to(`user:${userId}`).emit('user:online', { userId, isOnline: true });
 
     // ─────────────────────────────────────────
     // CHAT EVENTS
@@ -87,7 +98,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Join chat room
     socket.on('chat:join', async (chatId: string) => {
       try {
-        const isMember = await chatService.createOrGetChat(userId, userId); // Verify membership
+        const isMember = await chatRepository.isChatMember(chatId, userId);
         if (!isMember) {
           socket.emit('error', { message: 'Not a member of this chat', code: 'NOT_MEMBER' });
           return;
@@ -137,11 +148,34 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Send message
     socket.on('message:send', async (data, callback) => {
       try {
-        // Generate client message ID if not provided
+        const validation = validateMessageContent(data.content);
+        if (!validation.valid) {
+          callback({
+            success: false,
+            error: validation.error,
+            clientMessageId: data.clientMessageId,
+          });
+          return;
+        }
+
+        const rateLimit = checkRateLimit(
+          messageRateLimitKey(userId),
+          30,
+          60_000
+        );
+        if (!rateLimit.allowed) {
+          callback({
+            success: false,
+            error: 'Слишком много сообщений. Подождите немного.',
+            clientMessageId: data.clientMessageId,
+          });
+          return;
+        }
+
         const clientMessageId = data.clientMessageId || `${userId}_${Date.now()}_${Math.random()}`;
 
         const result = await chatService.sendMessage({
-          content: data.content,
+          content: validation.content!,
           senderId: userId,
           receiverId: data.receiverId,
           chatId: data.chatId,
@@ -203,12 +237,13 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
         );
 
         if (result.count > 0) {
-          // Notify other users about read status
-          socket.to(`chat:${data.chatId}`).emit('message:status', {
-            messageId: result.updatedIds[0], // Send first ID as reference
-            status: 'READ',
-            readAt: new Date(),
-          });
+          for (const messageId of result.updatedIds) {
+            socket.to(`chat:${data.chatId}`).emit('message:status', {
+              messageId,
+              status: 'READ',
+              readAt: new Date(),
+            });
+          }
         }
 
         console.log(`[Socket] ${result.count} messages marked as read in chat ${data.chatId}`);
@@ -220,8 +255,8 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Mark single message as delivered (used when receiving)
     socket.on('message:deliver', async (data) => {
       try {
-        // This is mainly for acknowledgment
-        socket.to(`chat:${data.messageId}`).emit('message:delivered', {
+        if (!data.chatId) return;
+        socket.to(`chat:${data.chatId}`).emit('message:delivered', {
           clientMessageId: '',
           messageId: data.messageId,
         });
@@ -267,8 +302,8 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
         if (sockets.size === 0) {
           userSockets.delete(userId);
           
-          // Broadcast offline status
-          io.emit('user:online', { userId, isOnline: false });
+          // Notify subscribers about offline status
+          io.to(`user:${userId}`).emit('user:online', { userId, isOnline: false });
         }
       }
 

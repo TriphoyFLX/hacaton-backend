@@ -1,7 +1,8 @@
-import { messageRepository, MessageWithSender } from '../repositories/messageRepository';
+import { messageRepository } from '../repositories/messageRepository';
 import { chatRepository, ChatWithUsers } from '../repositories/chatRepository';
 import { userRepository } from '../repositories/userRepository';
-import { MessageStatus } from '@prisma/client';
+import { validateMessageContent } from '../utils/messageValidation';
+import { MessageWithSender } from '../types';
 
 export interface SendMessageResult {
   success: boolean;
@@ -28,6 +29,13 @@ export class ChatService {
     clientMessageId: string;
   }): Promise<SendMessageResult> {
     try {
+      const validation = validateMessageContent(data.content);
+      if (!validation.valid || !validation.content) {
+        return { success: false, error: validation.error || 'Invalid message' };
+      }
+
+      const sanitizedContent = validation.content;
+
       // Verify sender is in chat
       const isMember = await chatRepository.isChatMember(data.chatId, data.senderId);
       if (!isMember) {
@@ -42,7 +50,7 @@ export class ChatService {
 
       // Create message (handles deduplication internally)
       const message = await messageRepository.createMessage({
-        content: data.content,
+        content: sanitizedContent,
         senderId: data.senderId,
         receiverId: data.receiverId,
         chatId: data.chatId,
@@ -53,17 +61,12 @@ export class ChatService {
         return { success: false, error: 'Failed to create message' };
       }
 
-      // Check if it was a duplicate
-      const isDuplicate = message.clientMessageId === data.clientMessageId && 
-                         message.createdAt < new Date(Date.now() - 1000); // Created more than 1 second ago
-
       // Update chat timestamp
       await chatRepository.updateTimestamp(data.chatId);
 
-      return { 
-        success: true, 
+      return {
+        success: true,
         message,
-        isDuplicate: isDuplicate || false
       };
     } catch (error) {
       console.error('ChatService.sendMessage error:', error);

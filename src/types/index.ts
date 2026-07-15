@@ -29,7 +29,7 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   'message:send': (data: SendMessageData, callback: (response: MessageResponse) => void) => void;
   'message:read': (data: { messageIds: string[]; chatId: string }) => void;
-  'message:deliver': (data: { messageId: string }) => void;
+  'message:deliver': (data: { messageId: string; chatId: string }) => void;
   'chat:join': (chatId: string) => void;
   'chat:leave': (chatId: string) => void;
   'chat:typing': (data: { chatId: string; isTyping: boolean }) => void;

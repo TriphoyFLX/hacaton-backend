@@ -3,6 +3,12 @@ import { chatService } from '../services/chatService';
 import { userRepository } from '../repositories/userRepository';
 import { chatRepository } from '../repositories/chatRepository';
 import { AuthenticatedRequest } from '../types';
+import { validateMessageContent } from '../utils/messageValidation';
+import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
+import { getIO } from '../websocket/socketServer';
+
+const MESSAGE_RATE_LIMIT = 30;
+const MESSAGE_RATE_WINDOW_MS = 60_000;
 
 /**
  * Get all chats for current user
@@ -29,7 +35,18 @@ export async function getChats(req: AuthenticatedRequest, res: Response) {
           displayName: otherUser.displayName,
           avatar: otherUser.avatar,
         } : null,
-        // Messages are already included via Prisma include
+        users: chat.users.map(cu => ({
+          id: cu.id,
+          userId: cu.userId,
+          chatId: cu.chatId,
+          createdAt: cu.createdAt,
+          user: {
+            id: cu.user.id,
+            username: cu.user.username,
+            displayName: cu.user.displayName,
+            avatar: cu.user.avatar,
+          },
+        })),
         messages: (chat as any).messages || [],
       };
     });
@@ -139,33 +156,48 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     }
 
     const { chatId } = req.params;
-    const { content, clientMessageId, receiverId } = req.body;
+    const { content, clientMessageId, receiverId: bodyReceiverId } = req.body;
 
-    if (!content || !content.trim()) {
-      return res.status(400).json({ error: 'Content required' });
+    const validation = validateMessageContent(content);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
     }
 
-    if (!receiverId) {
-      return res.status(400).json({ error: 'Receiver ID required' });
+    const rateLimit = checkRateLimit(
+      messageRateLimitKey(req.user.id),
+      MESSAGE_RATE_LIMIT,
+      MESSAGE_RATE_WINDOW_MS
+    );
+    if (!rateLimit.allowed) {
+      return res.status(429).json({
+        error: 'Слишком много сообщений. Подождите немного.',
+        retryAfterMs: rateLimit.retryAfterMs,
+      });
     }
 
-    // Check if user is in chat
     const isMember = await chatRepository.isChatMember(chatId, req.user.id);
     if (!isMember) {
       return res.status(403).json({ error: 'Not a member of this chat' });
     }
 
+    const receiverId = bodyReceiverId || await chatRepository.getOtherParticipant(chatId, req.user.id);
+    if (!receiverId) {
+      return res.status(400).json({ error: 'Receiver ID required' });
+    }
+
     const result = await chatService.sendMessage({
-      content: content.trim(),
+      content: validation.content!,
       senderId: req.user.id,
       receiverId,
       chatId,
       clientMessageId: clientMessageId || `${req.user.id}_${Date.now()}`,
     });
 
-    if (!result.success) {
+    if (!result.success || !result.message) {
       return res.status(400).json({ error: result.error });
     }
+
+    getIO()?.to(`chat:${chatId}`).emit('message:new', result.message);
 
     res.status(201).json(result.message);
   } catch (error) {

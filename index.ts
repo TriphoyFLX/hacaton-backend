@@ -7,8 +7,11 @@ import dotenv from 'dotenv';
 import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { createServer } from 'http';
 import { createProfileRouter } from './src/routes/profileRoutes';
 import { createFollowRouter } from './src/routes/followRoutes';
+import { createChatRouter } from './src/routes/chatRoutes';
+import { createSocketServer } from './src/websocket/socketServer';
 
 dotenv.config();
 const app = express();
@@ -293,6 +296,7 @@ const requireAdmin = async (req: any, res: any, next: any) => {
 
 app.use('/api/profile', createProfileRouter(authenticateToken, uploadsDir));
 app.use('/api/follows', createFollowRouter(authenticateToken));
+app.use('/api/chats', createChatRouter(authenticateToken));
 
 // Create post with media
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
@@ -734,243 +738,6 @@ app.get('/api/search', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Search failed' });
-  }
-});
-
-// Chat functionality
-app.get('/api/chats', async (req, res) => {
-  try {
-    const userId = getUserFromToken(req.headers.authorization);
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const chats = await prisma.chat.findMany({
-      where: {
-        users: {
-          some: {
-            userId: userId
-          }
-        }
-      },
-      include: {
-        users: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                username: true
-              }
-            }
-          }
-        },
-        messages: {
-          orderBy: {
-            createdAt: 'desc'
-          },
-          take: 1,
-          include: {
-            sender: {
-              select: {
-                id: true,
-                username: true
-              }
-            }
-          }
-        }
-      },
-      orderBy: {
-        updatedAt: 'desc'
-      }
-    });
-
-    res.json(chats);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch chats' });
-  }
-});
-
-app.get('/api/chats/:id/messages', async (req, res) => {
-  try {
-    const userId = getUserFromToken(req.headers.authorization);
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const chatId = req.params.id;
-
-    // Check if user is part of the chat
-    const chatUser = await prisma.chatUser.findFirst({
-      where: {
-        chatId,
-        userId
-      }
-    });
-
-    if (!chatUser) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    const messages = await prisma.message.findMany({
-      where: {
-        chatId
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            username: true
-          }
-        }
-      },
-      orderBy: {
-        createdAt: 'asc'
-      }
-    });
-
-    res.json(messages);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to fetch messages' });
-  }
-});
-
-app.post('/api/chats', async (req, res) => {
-  try {
-    const userId = getUserFromToken(req.headers.authorization);
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const { receiverId } = req.body;
-
-    if (!receiverId) {
-      return res.status(400).json({ error: 'Receiver ID required' });
-    }
-
-    if (receiverId === userId) {
-      return res.status(400).json({ error: 'Cannot chat with yourself' });
-    }
-
-    // Check if chat already exists
-    const existingChat = await prisma.chat.findFirst({
-      where: {
-        users: {
-          every: {
-            userId: {
-              in: [userId, receiverId]
-            }
-          }
-        }
-      },
-      include: {
-        users: true
-      }
-    });
-
-    if (existingChat && existingChat.users.length === 2) {
-      return res.json(existingChat);
-    }
-
-    // Create new chat
-    const chat = await prisma.chat.create({
-      data: {
-        users: {
-          create: [
-            { userId },
-            { userId: receiverId }
-          ]
-        }
-      },
-      include: {
-        users: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                username: true
-              }
-            }
-          }
-        }
-      }
-    });
-
-    res.status(201).json(chat);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to create chat' });
-  }
-});
-
-app.post('/api/chats/:id/messages', async (req, res) => {
-  try {
-    const userId = getUserFromToken(req.headers.authorization);
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const chatId = req.params.id;
-    const { content } = req.body;
-
-    if (!content) {
-      return res.status(400).json({ error: 'Content required' });
-    }
-
-    // Check if user is part of the chat
-    const chatUser = await prisma.chatUser.findFirst({
-      where: {
-        chatId,
-        userId
-      }
-    });
-
-    if (!chatUser) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    // Find receiver (the other user in the chat)
-    const otherUser = await prisma.chatUser.findFirst({
-      where: {
-        chatId,
-        userId: {
-          not: userId
-        }
-      }
-    });
-
-    if (!otherUser) {
-      return res.status(400).json({ error: 'Chat must have two users' });
-    }
-
-    const message = await prisma.message.create({
-      data: {
-        content,
-        senderId: userId,
-        receiverId: otherUser.userId,
-        chatId
-      },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            username: true
-          }
-        }
-      }
-    });
-
-    // Update chat timestamp
-    await prisma.chat.update({
-      where: { id: chatId },
-      data: { updatedAt: new Date() }
-    });
-
-    res.status(201).json(message);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
@@ -1830,6 +1597,10 @@ app.get('/api/check-generation/:id', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5002;
-app.listen(PORT, () => {
+const httpServer = createServer(app);
+createSocketServer(httpServer);
+
+httpServer.listen(PORT, () => {
   console.log(`Server on http://localhost:${PORT}`);
+  console.log(`WebSocket ready on ws://localhost:${PORT}`);
 });
