@@ -7,14 +7,24 @@ export interface MessageValidationResult {
   error?: string;
 }
 
-export function validateMessageContent(raw: unknown): MessageValidationResult {
+export function validateMessageContent(
+  raw: unknown,
+  options: { allowEmpty?: boolean } = {}
+): MessageValidationResult {
+  if (raw == null || raw === '') {
+    if (options.allowEmpty) {
+      return { valid: true, content: '' };
+    }
+    return { valid: false, error: 'Сообщение не может быть пустым' };
+  }
+
   if (typeof raw !== 'string') {
     return { valid: false, error: 'Сообщение должно быть текстом' };
   }
 
   const content = sanitizeMessageContent(raw);
 
-  if (!content) {
+  if (!content && !options.allowEmpty) {
     return { valid: false, error: 'Сообщение не может быть пустым' };
   }
 

@@ -1,10 +1,12 @@
-import { ChatType } from '@prisma/client';
+import { ChatType, PrismaClient } from '@prisma/client';
 import { messageRepository } from '../repositories/messageRepository';
 import { chatRepository, ChatWithUsers } from '../repositories/chatRepository';
 import { userRepository } from '../repositories/userRepository';
 import { blockRepository } from '../repositories/blockRepository';
 import { validateMessageContent } from '../utils/messageValidation';
 import { MessageWithSender } from '../types';
+
+const prisma = new PrismaClient();
 
 export interface SendMessageResult {
   success: boolean;
@@ -25,11 +27,31 @@ export class ChatService {
     receiverId?: string | null;
     chatId: string;
     clientMessageId: string;
+    soundTokId?: string | null;
   }): Promise<SendMessageResult> {
     try {
-      const validation = validateMessageContent(data.content);
-      if (!validation.valid || !validation.content) {
+      const hasSoundTok = !!data.soundTokId;
+      const validation = validateMessageContent(data.content, {
+        allowEmpty: hasSoundTok,
+      });
+      if (!validation.valid || validation.content === undefined) {
         return { success: false, error: validation.error || 'Invalid message' };
+      }
+
+      if (!hasSoundTok && !validation.content) {
+        return { success: false, error: 'Сообщение не может быть пустым' };
+      }
+
+      let soundTokId: string | null = null;
+      if (data.soundTokId) {
+        const soundTok = await prisma.soundTok.findUnique({
+          where: { id: data.soundTokId },
+          select: { id: true },
+        });
+        if (!soundTok) {
+          return { success: false, error: 'Видео не найдено' };
+        }
+        soundTokId = soundTok.id;
       }
 
       const chatMeta = await chatRepository.getChatMeta(data.chatId);
@@ -71,6 +93,7 @@ export class ChatService {
         receiverId,
         chatId: data.chatId,
         clientMessageId: data.clientMessageId,
+        soundTokId,
       });
 
       if (!message) {

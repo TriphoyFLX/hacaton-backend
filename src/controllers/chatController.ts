@@ -241,11 +241,17 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     }
 
     const { chatId } = req.params;
-    const { content, clientMessageId, receiverId: bodyReceiverId } = req.body;
+    const { content, clientMessageId, receiverId: bodyReceiverId, soundTokId } = req.body;
 
-    const validation = validateMessageContent(content);
+    const validation = validateMessageContent(content, {
+      allowEmpty: !!soundTokId,
+    });
     if (!validation.valid) {
       return res.status(400).json({ error: validation.error });
+    }
+
+    if (!soundTokId && !validation.content) {
+      return res.status(400).json({ error: 'Сообщение не может быть пустым' });
     }
 
     const rateLimit = checkRateLimit(
@@ -268,11 +274,12 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     const receiverId = bodyReceiverId || await chatRepository.getOtherParticipant(chatId, req.user.id);
 
     const result = await chatService.sendMessage({
-      content: validation.content!,
+      content: validation.content ?? '',
       senderId: req.user.id,
       receiverId: receiverId ?? null,
       chatId,
       clientMessageId: clientMessageId || `${req.user.id}_${Date.now()}`,
+      soundTokId: typeof soundTokId === 'string' ? soundTokId : null,
     });
 
     if (!result.success || !result.message) {

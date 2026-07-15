@@ -180,11 +180,22 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Send message
     socket.on('message:send', async (data, callback) => {
       try {
-        const validation = validateMessageContent(data.content);
+        const validation = validateMessageContent(data.content, {
+          allowEmpty: !!data.soundTokId,
+        });
         if (!validation.valid) {
           callback({
             success: false,
             error: validation.error,
+            clientMessageId: data.clientMessageId,
+          });
+          return;
+        }
+
+        if (!data.soundTokId && !validation.content) {
+          callback({
+            success: false,
+            error: 'Сообщение не может быть пустым',
             clientMessageId: data.clientMessageId,
           });
           return;
@@ -207,11 +218,12 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
         const clientMessageId = data.clientMessageId || `${userId}_${Date.now()}_${Math.random()}`;
 
         const result = await chatService.sendMessage({
-          content: validation.content!,
+          content: validation.content ?? '',
           senderId: userId,
           receiverId: data.receiverId ?? null,
           chatId: data.chatId,
           clientMessageId,
+          soundTokId: data.soundTokId ?? null,
         });
 
         if (!result.success || !result.message) {

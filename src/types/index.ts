@@ -47,12 +47,26 @@ export interface SocketData {
 }
 
 // Message types
+export interface SharedSoundTokPreview {
+  id: string;
+  description: string;
+  videoUrl: string;
+  authorId: string;
+  author: {
+    id: string;
+    username: string;
+    displayName?: string | null;
+    avatar?: string | null;
+  };
+}
+
 export interface MessageWithSender {
   id: string;
   content: string;
   senderId: string;
   receiverId?: string | null;
   chatId: string;
+  soundTokId?: string | null;
   clientMessageId?: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ';
   readAt?: Date | null;
@@ -64,6 +78,7 @@ export interface MessageWithSender {
     displayName?: string | null;
     avatar?: string | null;
   };
+  soundTok?: SharedSoundTokPreview | null;
 }
 
 export interface SendMessageData {
@@ -71,6 +86,7 @@ export interface SendMessageData {
   chatId: string;
   clientMessageId: string;
   receiverId?: string;
+  soundTokId?: string;
 }
 
 export interface MessageResponse {

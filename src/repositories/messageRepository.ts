@@ -3,6 +3,33 @@ import { MessageWithSender } from '../types';
 
 const prisma = new PrismaClient();
 
+const messageInclude = {
+  sender: {
+    select: {
+      id: true,
+      username: true,
+      displayName: true,
+      avatar: true,
+    },
+  },
+  soundTok: {
+    select: {
+      id: true,
+      description: true,
+      videoUrl: true,
+      authorId: true,
+      author: {
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          avatar: true,
+        },
+      },
+    },
+  },
+} as const;
+
 export class MessageRepository {
   /**
    * Create a new message with deduplication check
@@ -13,6 +40,7 @@ export class MessageRepository {
     receiverId?: string | null;
     chatId: string;
     clientMessageId?: string;
+    soundTokId?: string | null;
   }): Promise<MessageWithSender | null> {
     // Check for duplicate message
     if (data.clientMessageId) {
@@ -21,16 +49,7 @@ export class MessageRepository {
           clientMessageId: data.clientMessageId,
           chatId: data.chatId,
         },
-        include: {
-          sender: {
-            select: {
-              id: true,
-              username: true,
-              displayName: true,
-              avatar: true,
-            },
-          },
-        },
+        include: messageInclude,
       });
 
       if (existing) {
@@ -45,18 +64,10 @@ export class MessageRepository {
         receiverId: data.receiverId,
         chatId: data.chatId,
         clientMessageId: data.clientMessageId,
+        soundTokId: data.soundTokId || null,
         status: MessageStatus.SENT,
       },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true,
-            avatar: true,
-          },
-        },
-      },
+      include: messageInclude,
     }) as Promise<MessageWithSender>;
   }
 
@@ -85,16 +96,7 @@ export class MessageRepository {
       skip: cursor ? 1 : 0,
       cursor: cursor ? { id: cursor } : undefined,
       orderBy: { createdAt: 'asc' },
-      include: {
-        sender: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true,
-            avatar: true,
-          },
-        },
-      },
+      include: messageInclude,
     }) as Promise<MessageWithSender[]>;
   }
 
@@ -203,16 +205,7 @@ export class MessageRepository {
       },
       orderBy: { createdAt: 'desc' },
       distinct: ['chatId'],
-      include: {
-        sender: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true,
-            avatar: true,
-          },
-        },
-      },
+      include: messageInclude,
     });
 
     const result = new Map<string, MessageWithSender>();

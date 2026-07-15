@@ -17,20 +17,36 @@ const chatUserInclude = {
 
 const chatListInclude = {
   users: chatUserInclude,
-  messages: {
-    orderBy: { createdAt: 'desc' as const },
-    take: 1,
-    include: {
-      sender: {
-        select: {
-          id: true,
-          username: true,
-          displayName: true,
-          avatar: true,
+        messages: {
+          orderBy: { createdAt: 'desc' as const },
+          take: 1,
+          include: {
+            sender: {
+              select: {
+                id: true,
+                username: true,
+                displayName: true,
+                avatar: true,
+              },
+            },
+            soundTok: {
+              select: {
+                id: true,
+                description: true,
+                videoUrl: true,
+                authorId: true,
+                author: {
+                  select: {
+                    id: true,
+                    username: true,
+                    displayName: true,
+                    avatar: true,
+                  },
+                },
+              },
+            },
+          },
         },
-      },
-    },
-  },
 };
 
 export interface ChatWithUsers {

@@ -97,6 +97,7 @@ model SoundTok {
   author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   comments    Comment[]
   likesList   Like[]
+  sharedMessages Message[]
 
   @@map("sound_toks")
 }
@@ -147,6 +148,7 @@ model Message {
   senderId  String
   receiverId String?
   chatId    String
+  soundTokId String?
   
   // For deduplication and status tracking
   clientMessageId String?   // ID generated on client to prevent duplicates
@@ -159,10 +161,12 @@ model Message {
   sender    User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
   receiver  User?    @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
   chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  soundTok  SoundTok? @relation(fields: [soundTokId], references: [id], onDelete: SetNull)
 
   @@unique([clientMessageId, chatId]) // Prevent duplicate messages from same client
   @@index([chatId, createdAt])         // Optimize message history queries
   @@index([senderId, status])          // Optimize status update queries
+  @@index([soundTokId])
   @@map("messages")
 }
 
