@@ -22,6 +22,7 @@ export interface ServerToClientEvents {
   'message:status': (data: { messageId: string; status: string; readAt?: Date }) => void;
   'message:delivered': (data: { clientMessageId: string; messageId: string }) => void;
   'chat:typing': (data: { chatId: string; userId: string; isTyping: boolean }) => void;
+  'chat:presence': (data: { chatId: string; userId: string; isOnline: boolean }) => void;
   'user:online': (data: { userId: string; isOnline: boolean }) => void;
   'error': (error: { message: string; code: string }) => void;
 }
@@ -50,7 +51,7 @@ export interface MessageWithSender {
   id: string;
   content: string;
   senderId: string;
-  receiverId: string;
+  receiverId?: string | null;
   chatId: string;
   clientMessageId?: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ';
@@ -69,7 +70,7 @@ export interface SendMessageData {
   content: string;
   chatId: string;
   clientMessageId: string;
-  receiverId: string;
+  receiverId?: string;
 }
 
 export interface MessageResponse {

@@ -10,7 +10,7 @@ export class MessageRepository {
   async createMessage(data: {
     content: string;
     senderId: string;
-    receiverId: string;
+    receiverId?: string | null;
     chatId: string;
     clientMessageId?: string;
   }): Promise<MessageWithSender | null> {
@@ -164,6 +164,26 @@ export class MessageRepository {
    * Get unread message count for a user in a chat
    */
   async getUnreadCount(chatId: string, userId: string): Promise<number> {
+    const chatUser = await prisma.chatUser.findUnique({
+      where: { userId_chatId: { userId, chatId } },
+      select: { lastReadAt: true },
+    });
+
+    const chat = await prisma.chat.findUnique({
+      where: { id: chatId },
+      select: { type: true },
+    });
+
+    if (chat?.type === 'GROUP') {
+      return prisma.message.count({
+        where: {
+          chatId,
+          senderId: { not: userId },
+          createdAt: { gt: chatUser?.lastReadAt ?? new Date(0) },
+        },
+      });
+    }
+
     return prisma.message.count({
       where: {
         chatId,

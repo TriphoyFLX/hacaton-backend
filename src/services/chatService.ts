@@ -1,6 +1,8 @@
+import { ChatType } from '@prisma/client';
 import { messageRepository } from '../repositories/messageRepository';
 import { chatRepository, ChatWithUsers } from '../repositories/chatRepository';
 import { userRepository } from '../repositories/userRepository';
+import { blockRepository } from '../repositories/blockRepository';
 import { validateMessageContent } from '../utils/messageValidation';
 import { MessageWithSender } from '../types';
 
@@ -8,7 +10,6 @@ export interface SendMessageResult {
   success: boolean;
   message?: MessageWithSender;
   error?: string;
-  isDuplicate?: boolean;
 }
 
 export interface ChatInfo {
@@ -18,13 +19,10 @@ export interface ChatInfo {
 }
 
 export class ChatService {
-  /**
-   * Send a message with deduplication check
-   */
   async sendMessage(data: {
     content: string;
     senderId: string;
-    receiverId: string;
+    receiverId?: string | null;
     chatId: string;
     clientMessageId: string;
   }): Promise<SendMessageResult> {
@@ -34,25 +32,43 @@ export class ChatService {
         return { success: false, error: validation.error || 'Invalid message' };
       }
 
-      const sanitizedContent = validation.content;
+      const chatMeta = await chatRepository.getChatMeta(data.chatId);
+      if (!chatMeta) {
+        return { success: false, error: 'Chat not found' };
+      }
 
-      // Verify sender is in chat
       const isMember = await chatRepository.isChatMember(data.chatId, data.senderId);
       if (!isMember) {
         return { success: false, error: 'Not a member of this chat' };
       }
 
-      // Verify receiver exists and is in chat
-      const receiverInChat = await chatRepository.isChatMember(data.chatId, data.receiverId);
-      if (!receiverInChat) {
-        return { success: false, error: 'Receiver not in chat' };
+      let receiverId: string | null = data.receiverId ?? null;
+
+      if (chatMeta.type === ChatType.DIRECT) {
+        if (!receiverId) {
+          receiverId = await chatRepository.getOtherParticipant(data.chatId, data.senderId);
+        }
+        if (!receiverId) {
+          return { success: false, error: 'Receiver not in chat' };
+        }
+
+        const isBlocked = await blockRepository.isEitherBlocked(data.senderId, receiverId);
+        if (isBlocked) {
+          return { success: false, error: 'Невозможно отправить сообщение этому пользователю' };
+        }
+
+        const receiverInChat = await chatRepository.isChatMember(data.chatId, receiverId);
+        if (!receiverInChat) {
+          return { success: false, error: 'Receiver not in chat' };
+        }
+      } else {
+        receiverId = null;
       }
 
-      // Create message (handles deduplication internally)
       const message = await messageRepository.createMessage({
-        content: sanitizedContent,
+        content: validation.content,
         senderId: data.senderId,
-        receiverId: data.receiverId,
+        receiverId,
         chatId: data.chatId,
         clientMessageId: data.clientMessageId,
       });
@@ -61,32 +77,22 @@ export class ChatService {
         return { success: false, error: 'Failed to create message' };
       }
 
-      // Update chat timestamp
       await chatRepository.updateTimestamp(data.chatId);
 
-      return {
-        success: true,
-        message,
-      };
+      return { success: true, message };
     } catch (error) {
       console.error('ChatService.sendMessage error:', error);
       return { success: false, error: 'Internal server error' };
     }
   }
 
-  /**
-   * Get chat history with messages
-   */
   async getChatHistory(
     chatId: string,
     userId: string,
     options: { cursor?: string; limit?: number } = {}
   ): Promise<ChatInfo | null> {
-    // Verify user is in chat
     const isMember = await chatRepository.isChatMember(chatId, userId);
-    if (!isMember) {
-      return null;
-    }
+    if (!isMember) return null;
 
     const [chat, messages, unreadCount] = await Promise.all([
       chatRepository.getChatById(chatId),
@@ -97,115 +103,127 @@ export class ChatService {
       messageRepository.getUnreadCount(chatId, userId),
     ]);
 
-    if (!chat) {
-      return null;
-    }
+    if (!chat) return null;
 
-    return {
-      chat,
-      messages,
-      unreadCount,
-    };
+    return { chat, messages, unreadCount };
   }
 
-  /**
-   * Get all chats for user
-   */
   async getUserChats(userId: string): Promise<ChatWithUsers[]> {
     return chatRepository.getChatsByUserId(userId);
   }
 
-  /**
-   * Create or get existing chat
-   */
   async createOrGetChat(userId1: string, userId2: string): Promise<ChatWithUsers | null> {
-    // Verify both users exist
     const [user1, user2] = await Promise.all([
       userRepository.getUserById(userId1),
       userRepository.getUserById(userId2),
     ]);
 
-    if (!user1 || !user2) {
-      return null;
-    }
+    if (!user1 || !user2 || userId1 === userId2) return null;
 
-    if (userId1 === userId2) {
-      return null;
-    }
+    const isBlocked = await blockRepository.isEitherBlocked(userId1, userId2);
+    if (isBlocked) return null;
 
     return chatRepository.createChat(userId1, userId2);
   }
 
-  /**
-   * Mark messages as read
-   */
+  async createGroup(
+    creatorId: string,
+    name: string,
+    memberIds: string[]
+  ): Promise<{ success: boolean; chat?: ChatWithUsers; error?: string }> {
+    const trimmedName = name?.trim();
+    if (!trimmedName || trimmedName.length < 2) {
+      return { success: false, error: 'Название группы должно быть минимум 2 символа' };
+    }
+
+    const uniqueMembers = [...new Set(memberIds.filter((id) => id !== creatorId))];
+    if (uniqueMembers.length < 1) {
+      return { success: false, error: 'Добавьте хотя бы одного участника' };
+    }
+
+    for (const memberId of uniqueMembers) {
+      const user = await userRepository.getUserById(memberId);
+      if (!user) {
+        return { success: false, error: 'Один из участников не найден' };
+      }
+      const blocked = await blockRepository.isEitherBlocked(creatorId, memberId);
+      if (blocked) {
+        return { success: false, error: 'Нельзя добавить заблокированного пользователя' };
+      }
+    }
+
+    const chat = await chatRepository.createGroupChat(creatorId, trimmedName, uniqueMembers);
+    return { success: true, chat };
+  }
+
+  async togglePin(
+    chatId: string,
+    userId: string,
+    pinned: boolean
+  ): Promise<{ success: boolean; pinnedAt: Date | null }> {
+    const isMember = await chatRepository.isChatMember(chatId, userId);
+    if (!isMember) {
+      return { success: false, pinnedAt: null };
+    }
+
+    const pinnedAt = await chatRepository.setChatPinned(chatId, userId, pinned);
+    return { success: true, pinnedAt };
+  }
+
   async markMessagesAsRead(
     messageIds: string[],
     userId: string,
     chatId: string
   ): Promise<{ count: number; updatedIds: string[] }> {
-    // Verify user is in chat
     const isMember = await chatRepository.isChatMember(chatId, userId);
     if (!isMember) {
       return { count: 0, updatedIds: [] };
     }
 
-    // Verify messages belong to this chat and user is receiver
+    await chatRepository.updateLastReadAt(chatId, userId);
+
+    const chatMeta = await chatRepository.getChatMeta(chatId);
+    if (chatMeta?.type === ChatType.GROUP) {
+      return { count: 1, updatedIds: messageIds };
+    }
+
     const validMessageIds = await this.validateMessageIds(messageIds, chatId, userId);
-    
     if (validMessageIds.length === 0) {
       return { count: 0, updatedIds: [] };
     }
 
     const count = await messageRepository.markAsRead(validMessageIds, userId);
-
-    return {
-      count,
-      updatedIds: validMessageIds,
-    };
+    return { count, updatedIds: validMessageIds };
   }
 
-  /**
-   * Mark messages as delivered when user opens chat
-   */
   async markChatAsDelivered(chatId: string, userId: string): Promise<string[]> {
     const messages = await messageRepository.markAsDelivered(chatId, userId);
-    return messages.map(m => m.id);
+    return messages.map((m) => m.id);
   }
 
-  /**
-   * Get unread counts for all chats
-   */
   async getUnreadCounts(userId: string, chatIds: string[]): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
-
     await Promise.all(
       chatIds.map(async (chatId) => {
         const count = await messageRepository.getUnreadCount(chatId, userId);
         counts.set(chatId, count);
       })
     );
-
     return counts;
   }
 
-  /**
-   * Validate that messages belong to chat and user is receiver
-   */
   private async validateMessageIds(
     messageIds: string[],
     chatId: string,
     userId: string
   ): Promise<string[]> {
     const messages = await messageRepository.getMessagesByChatId(chatId);
-    
     const validIds = new Set(
       messages
-        .filter(m => m.receiverId === userId && messageIds.includes(m.id))
-        .map(m => m.id)
+        .filter((m) => m.receiverId === userId && messageIds.includes(m.id))
+        .map((m) => m.id)
     );
-
-    return messageIds.filter(id => validIds.has(id));
+    return messageIds.filter((id) => validIds.has(id));
   }
 }
 

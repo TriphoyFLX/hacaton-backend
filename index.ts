@@ -11,7 +11,8 @@ import { createServer } from 'http';
 import { createProfileRouter } from './src/routes/profileRoutes';
 import { createFollowRouter } from './src/routes/followRoutes';
 import { createChatRouter } from './src/routes/chatRoutes';
-import { createSocketServer } from './src/websocket/socketServer';
+import { createBlockRouter } from './src/routes/blockRoutes';
+import { createSocketServer, getUserOnlineStatus } from './src/websocket/socketServer';
 
 dotenv.config();
 const app = express();
@@ -297,6 +298,7 @@ const requireAdmin = async (req: any, res: any, next: any) => {
 app.use('/api/profile', createProfileRouter(authenticateToken, uploadsDir));
 app.use('/api/follows', createFollowRouter(authenticateToken));
 app.use('/api/chats', createChatRouter(authenticateToken));
+app.use('/api/blocks', createBlockRouter(authenticateToken));
 
 // Create post with media
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
@@ -839,6 +841,29 @@ app.delete('/api/admin/soundtoks/:id', requireAdmin, async (req, res) => {
     res.json({ message: 'SoundTok deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete soundtok' });
+  }
+});
+
+app.get('/api/users/:userId/presence', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { userId } = req.params;
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ isOnline: getUserOnlineStatus(userId) });
+  } catch (error) {
+    console.error('presence error:', error);
+    res.status(500).json({ error: 'Failed to fetch presence' });
   }
 });
 

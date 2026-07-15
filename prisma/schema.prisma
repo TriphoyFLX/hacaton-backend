@@ -18,6 +18,11 @@ enum MessageStatus {
   READ
 }
 
+enum ChatType {
+  DIRECT
+  GROUP
+}
+
 model User {
   id         String    @id @default(cuid())
   email      String    @unique
@@ -48,6 +53,8 @@ model User {
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
+  blocks    Block[] @relation("UserBlocks")
+  blockedBy Block[] @relation("UserBlockedBy")
 
   @@map("users")
 }
@@ -122,6 +129,9 @@ model Like {
 
 model Chat {
   id        String   @id @default(cuid())
+  type      ChatType @default(DIRECT)
+  name      String?
+  creatorId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -135,7 +145,7 @@ model Message {
   id        String   @id @default(cuid())
   content   String
   senderId  String
-  receiverId String
+  receiverId String?
   chatId    String
   
   // For deduplication and status tracking
@@ -147,7 +157,7 @@ model Message {
   updatedAt DateTime @updatedAt
 
   sender    User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
-  receiver  User     @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+  receiver  User?    @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
   chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
   @@unique([clientMessageId, chatId]) // Prevent duplicate messages from same client
@@ -157,10 +167,12 @@ model Message {
 }
 
 model ChatUser {
-  id     String @id @default(cuid())
-  userId String
-  chatId String
-  createdAt DateTime @default(now())
+  id         String    @id @default(cuid())
+  userId     String
+  chatId     String
+  pinnedAt   DateTime?
+  lastReadAt DateTime?
+  createdAt  DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
@@ -282,4 +294,18 @@ model Follow {
   @@unique([followerId, followingId])
   @@index([followingId])
   @@map("follows")
+}
+
+model Block {
+  id        String   @id @default(cuid())
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("UserBlocks", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("UserBlockedBy", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+  @@map("blocks")
 }

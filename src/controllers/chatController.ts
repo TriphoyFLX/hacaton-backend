@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { chatService } from '../services/chatService';
 import { userRepository } from '../repositories/userRepository';
 import { chatRepository } from '../repositories/chatRepository';
+import { blockService } from '../services/blockService';
 import { AuthenticatedRequest } from '../types';
 import { validateMessageContent } from '../utils/messageValidation';
 import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
@@ -9,6 +10,75 @@ import { getIO } from '../websocket/socketServer';
 
 const MESSAGE_RATE_LIMIT = 30;
 const MESSAGE_RATE_WINDOW_MS = 60_000;
+
+function formatChat(chat: any, currentUserId: string, unreadCount = 0) {
+  const currentMembership = chat.users.find((u: any) => u.userId === currentUserId);
+  const otherUser = chat.type === 'DIRECT'
+    ? chat.users.find((u: any) => u.user.id !== currentUserId)?.user
+    : null;
+
+  return {
+    id: chat.id,
+    type: chat.type,
+    name: chat.name,
+    creatorId: chat.creatorId,
+    createdAt: chat.createdAt,
+    updatedAt: chat.updatedAt,
+    unreadCount,
+    isPinned: !!currentMembership?.pinnedAt,
+    pinnedAt: currentMembership?.pinnedAt ?? null,
+    memberCount: chat.users.length,
+    otherUser: otherUser
+      ? {
+          id: otherUser.id,
+          username: otherUser.username,
+          displayName: otherUser.displayName,
+          avatar: otherUser.avatar,
+        }
+      : null,
+    users: chat.users.map((cu: any) => ({
+      id: cu.id,
+      userId: cu.userId,
+      chatId: cu.chatId,
+      pinnedAt: cu.pinnedAt,
+      createdAt: cu.createdAt,
+      user: {
+        id: cu.user.id,
+        username: cu.user.username,
+        displayName: cu.user.displayName,
+        avatar: cu.user.avatar,
+      },
+    })),
+    messages: chat.messages || [],
+  };
+}
+
+/**
+ * Get total unread message count
+ */
+export async function getUnreadTotal(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const chats = await chatService.getUserChats(req.user.id);
+    const unreadCounts = await chatService.getUnreadCounts(
+      req.user.id,
+      chats.map(chat => chat.id)
+    );
+
+    let total = 0;
+    unreadCounts.forEach(count => {
+      total += count;
+    });
+
+    res.json({ total });
+  } catch (error) {
+    console.error('getUnreadTotal error:', error);
+    res.status(500).json({ error: 'Failed to fetch unread count' });
+  }
+}
 
 /**
  * Get all chats for current user
@@ -20,36 +90,14 @@ export async function getChats(req: AuthenticatedRequest, res: Response) {
     }
 
     const chats = await chatService.getUserChats(req.user.id);
+    const unreadCounts = await chatService.getUnreadCounts(
+      req.user.id,
+      chats.map(chat => chat.id)
+    );
     
-    // Format chats with other user info and last message
-    const formattedChats = chats.map(chat => {
-      const otherUser = chat.users.find(u => u.user.id !== req.user!.id)?.user;
-      
-      return {
-        id: chat.id,
-        createdAt: chat.createdAt,
-        updatedAt: chat.updatedAt,
-        otherUser: otherUser ? {
-          id: otherUser.id,
-          username: otherUser.username,
-          displayName: otherUser.displayName,
-          avatar: otherUser.avatar,
-        } : null,
-        users: chat.users.map(cu => ({
-          id: cu.id,
-          userId: cu.userId,
-          chatId: cu.chatId,
-          createdAt: cu.createdAt,
-          user: {
-            id: cu.user.id,
-            username: cu.user.username,
-            displayName: cu.user.displayName,
-            avatar: cu.user.avatar,
-          },
-        })),
-        messages: (chat as any).messages || [],
-      };
-    });
+    const formattedChats = chats.map((chat) =>
+      formatChat(chat, req.user!.id, unreadCounts.get(chat.id) || 0)
+    );
 
     res.json(formattedChats);
   } catch (error) {
@@ -80,7 +128,7 @@ export async function getMessages(req: AuthenticatedRequest, res: Response) {
     }
 
     res.json({
-      chat: chatInfo.chat,
+      chat: formatChat(chatInfo.chat, req.user.id, chatInfo.unreadCount),
       messages: chatInfo.messages,
       unreadCount: chatInfo.unreadCount,
     });
@@ -115,34 +163,71 @@ export async function createChat(req: AuthenticatedRequest, res: Response) {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    const isBlocked = await blockService.isEitherBlocked(req.user.id, receiverId);
+    if (isBlocked) {
+      return res.status(403).json({ error: 'Невозможно начать чат с этим пользователем' });
+    }
+
     const otherUser = chat.users.find(u => u.user.id !== req.user!.id)?.user;
 
-    res.status(201).json({
-      id: chat.id,
-      createdAt: chat.createdAt,
-      updatedAt: chat.updatedAt,
-      otherUser: otherUser ? {
-        id: otherUser.id,
-        username: otherUser.username,
-        displayName: otherUser.displayName,
-        avatar: otherUser.avatar,
-      } : null,
-      users: chat.users.map(cu => ({
-        id: cu.id,
-        userId: cu.userId,
-        chatId: cu.chatId,
-        createdAt: cu.createdAt,
-        user: {
-          id: cu.user.id,
-          username: cu.user.username,
-          displayName: cu.user.displayName,
-          avatar: cu.user.avatar,
-        },
-      })),
-    });
+    res.status(201).json(formatChat(chat, req.user.id, 0));
   } catch (error) {
     console.error('createChat error:', error);
     res.status(500).json({ error: 'Failed to create chat' });
+  }
+}
+
+export async function createGroup(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { name, memberIds } = req.body;
+
+    if (!Array.isArray(memberIds)) {
+      return res.status(400).json({ error: 'memberIds must be an array' });
+    }
+
+    const result = await chatService.createGroup(req.user.id, name, memberIds);
+    if (!result.success || !result.chat) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    res.status(201).json(formatChat(result.chat, req.user.id, 0));
+  } catch (error) {
+    console.error('createGroup error:', error);
+    res.status(500).json({ error: 'Failed to create group' });
+  }
+}
+
+export async function pinChat(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { chatId } = req.params;
+    const { pinned } = req.body;
+
+    if (typeof pinned !== 'boolean') {
+      return res.status(400).json({ error: 'pinned must be boolean' });
+    }
+
+    const result = await chatService.togglePin(chatId, req.user.id, pinned);
+    if (!result.success) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.json({
+      success: true,
+      pinned,
+      isPinned: !!result.pinnedAt,
+      pinnedAt: result.pinnedAt,
+    });
+  } catch (error) {
+    console.error('pinChat error:', error);
+    res.status(500).json({ error: 'Failed to pin chat' });
   }
 }
 
@@ -181,14 +266,11 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     }
 
     const receiverId = bodyReceiverId || await chatRepository.getOtherParticipant(chatId, req.user.id);
-    if (!receiverId) {
-      return res.status(400).json({ error: 'Receiver ID required' });
-    }
 
     const result = await chatService.sendMessage({
       content: validation.content!,
       senderId: req.user.id,
-      receiverId,
+      receiverId: receiverId ?? null,
       chatId,
       clientMessageId: clientMessageId || `${req.user.id}_${Date.now()}`,
     });
@@ -218,7 +300,7 @@ export async function markAsRead(req: AuthenticatedRequest, res: Response) {
     const { chatId } = req.params;
     const { messageIds } = req.body;
 
-    if (!Array.isArray(messageIds) || messageIds.length === 0) {
+    if (!Array.isArray(messageIds)) {
       return res.status(400).json({ error: 'Message IDs array required' });
     }
 

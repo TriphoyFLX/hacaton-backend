@@ -91,6 +91,16 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Notify subscribers about online status
     io.to(`user:${userId}`).emit('user:online', { userId, isOnline: true });
 
+    activeChatUsers.forEach((users, chatId) => {
+      if (users.has(userId)) {
+        io.to(`chat:${chatId}`).emit('chat:presence', {
+          chatId,
+          userId,
+          isOnline: true,
+        });
+      }
+    });
+
     // ─────────────────────────────────────────
     // CHAT EVENTS
     // ─────────────────────────────────────────
@@ -111,6 +121,22 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           activeChatUsers.set(chatId, new Set());
         }
         activeChatUsers.get(chatId)!.add(userId);
+
+        const participants = await chatRepository.getChatParticipants(chatId);
+        for (const participantId of participants) {
+          if (participantId === userId) continue;
+          socket.emit('chat:presence', {
+            chatId,
+            userId: participantId,
+            isOnline: userSockets.has(participantId),
+          });
+        }
+
+        socket.to(`chat:${chatId}`).emit('chat:presence', {
+          chatId,
+          userId,
+          isOnline: true,
+        });
 
         // Mark messages as delivered since user is now active
         const deliveredIds = await chatService.markChatAsDelivered(chatId, userId);
@@ -141,6 +167,12 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           activeChatUsers.delete(chatId);
         }
       }
+
+      socket.to(`chat:${chatId}`).emit('chat:presence', {
+        chatId,
+        userId,
+        isOnline: userSockets.has(userId),
+      });
 
       console.log(`[Socket] ${username} left chat ${chatId}`);
     });
@@ -177,7 +209,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
         const result = await chatService.sendMessage({
           content: validation.content!,
           senderId: userId,
-          receiverId: data.receiverId,
+          receiverId: data.receiverId ?? null,
           chatId: data.chatId,
           clientMessageId,
         });
@@ -280,10 +312,10 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
 
     socket.on('user:subscribe', (targetUserId: string) => {
       socket.join(`user:${targetUserId}`);
-      
-      // Send current online status
-      const isOnline = userSockets.has(targetUserId);
-      socket.emit('user:online', { userId: targetUserId, isOnline });
+      socket.emit('user:online', {
+        userId: targetUserId,
+        isOnline: userSockets.has(targetUserId),
+      });
     });
 
     // ─────────────────────────────────────────
@@ -302,8 +334,17 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
         if (sockets.size === 0) {
           userSockets.delete(userId);
           
-          // Notify subscribers about offline status
           io.to(`user:${userId}`).emit('user:online', { userId, isOnline: false });
+
+          activeChatUsers.forEach((users, chatId) => {
+            if (users.has(userId)) {
+              io.to(`chat:${chatId}`).emit('chat:presence', {
+                chatId,
+                userId,
+                isOnline: false,
+              });
+            }
+          });
         }
       }
 
