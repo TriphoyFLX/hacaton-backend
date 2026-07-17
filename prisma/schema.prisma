@@ -61,6 +61,7 @@ model User {
   battleRecordings BattleRecording[]
   battleRatings BattleRating[]
   midiProjects MidiProject[]
+  midiSamples MidiSample[]
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
@@ -79,9 +80,28 @@ model MidiProject {
   updatedAt DateTime @updatedAt
 
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  samples MidiSample[]
 
   @@index([ownerId, updatedAt])
   @@map("midi_projects")
+}
+
+model MidiSample {
+  id        String   @id @default(cuid())
+  name      String
+  mimeType  String
+  data      Bytes
+  size      Int
+  ownerId   String
+  projectId String
+  createdAt DateTime @default(now())
+
+  owner   User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  project MidiProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+  @@index([projectId])
+  @@map("midi_samples")
 }
 
 model Post {

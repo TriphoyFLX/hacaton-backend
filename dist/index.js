@@ -59,6 +59,28 @@ const upload = (0, multer_1.default)({
         }
     }
 });
+const MIDI_SAMPLE_MAX_BYTES = 3 * 1024 * 1024;
+const midiSampleUpload = (0, multer_1.default)({
+    storage: multer_1.default.memoryStorage(),
+    limits: { fileSize: MIDI_SAMPLE_MAX_BYTES, files: 1 },
+    fileFilter: (_req, file, cb) => {
+        const isAudio = file.mimetype.startsWith('audio/')
+            || /\.(mp3|wav|ogg|flac|m4a|aac|aiff?|webm)$/i.test(file.originalname);
+        if (!isAudio)
+            return cb(new Error('Only audio files are allowed'));
+        cb(null, true);
+    },
+});
+const receiveMidiSample = (req, res, next) => {
+    midiSampleUpload.single('sample')(req, res, (error) => {
+        if (!error)
+            return next();
+        if (error instanceof multer_1.default.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: 'Sample must not exceed 3 MB' });
+        }
+        return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid sample' });
+    });
+};
 app.use((0, cors_1.default)());
 app.use(express_1.default.json({ limit: '5mb' }));
 app.use('/uploads', express_1.default.static(uploadsDir));
@@ -437,6 +459,59 @@ app.get('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res)
     if (!project)
         return res.status(404).json({ error: 'Project not found' });
     res.json(project);
+}));
+app.post('/api/midi-projects/:id/samples', authenticateToken, receiveMidiSample, asyncRoute(async (req, res) => {
+    const project = await prisma.midiProject.findFirst({
+        where: { id: req.params.id, ownerId: req.user.id },
+        select: { id: true },
+    });
+    if (!project)
+        return res.status(404).json({ error: 'Project not found' });
+    if (!req.file?.buffer)
+        return res.status(400).json({ error: 'Audio sample is required' });
+    const requestedId = typeof req.body?.sampleId === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.body.sampleId)
+        ? req.body.sampleId
+        : undefined;
+    if (requestedId) {
+        const existing = await prisma.midiSample.findUnique({
+            where: { id: requestedId },
+            select: { id: true, ownerId: true, projectId: true, name: true, mimeType: true, size: true, createdAt: true },
+        });
+        if (existing) {
+            if (existing.ownerId !== req.user.id || existing.projectId !== project.id) {
+                return res.status(409).json({ error: 'Sample ID is already in use' });
+            }
+            const { ownerId: _ownerId, projectId: _projectId, ...metadata } = existing;
+            return res.json(metadata);
+        }
+    }
+    const sample = await prisma.midiSample.create({
+        data: {
+            ...(requestedId ? { id: requestedId } : {}),
+            name: req.file.originalname.slice(0, 255),
+            mimeType: req.file.mimetype || 'application/octet-stream',
+            data: req.file.buffer,
+            size: req.file.size,
+            ownerId: req.user.id,
+            projectId: project.id,
+        },
+        select: { id: true, name: true, mimeType: true, size: true, createdAt: true },
+    });
+    res.status(201).json(sample);
+}));
+app.get('/api/midi-samples/:id', authenticateToken, asyncRoute(async (req, res) => {
+    const sample = await prisma.midiSample.findFirst({
+        where: { id: req.params.id, ownerId: req.user.id },
+        select: { data: true, mimeType: true, size: true },
+    });
+    if (!sample)
+        return res.status(404).json({ error: 'Sample not found' });
+    res.setHeader('Content-Type', sample.mimeType);
+    res.setHeader('Content-Length', String(sample.size));
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(Buffer.from(sample.data));
 }));
 app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) => {
     const body = req.body || {};
