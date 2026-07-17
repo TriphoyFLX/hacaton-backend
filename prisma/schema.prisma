@@ -60,6 +60,7 @@ model User {
   battleParticipants BattleParticipant[]
   battleRecordings BattleRecording[]
   battleRatings BattleRating[]
+  midiProjects MidiProject[]
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
@@ -67,6 +68,20 @@ model User {
   blockedBy Block[] @relation("UserBlockedBy")
 
   @@map("users")
+}
+
+model MidiProject {
+  id        String   @id @default(cuid())
+  name      String
+  data      Json
+  ownerId   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, updatedAt])
+  @@map("midi_projects")
 }
 
 model Post {

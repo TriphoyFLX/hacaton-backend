@@ -1,4 +1,4 @@
-import express, { Request } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -73,7 +73,7 @@ const upload = multer({
 });
 app.use(cors());
 
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
 const userPublicSelect = {
@@ -496,6 +496,79 @@ const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any)
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
+
+const isMidiProjectData = (value: unknown): value is Record<string, unknown> => {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+};
+
+const asyncRoute = (
+  handler: (req: AuthenticatedRequest, res: Response) => Promise<unknown>,
+) => (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  void handler(req, res).catch(next);
+};
+
+// MIDI projects are private to the authenticated account.
+app.get('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) => {
+  const projects = await prisma.midiProject.findMany({
+    where: { ownerId: req.user!.id },
+    select: { id: true, name: true, createdAt: true, updatedAt: true },
+    orderBy: { updatedAt: 'desc' },
+  });
+  res.json(projects);
+}));
+
+app.get('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res) => {
+  const project = await prisma.midiProject.findFirst({
+    where: { id: req.params.id, ownerId: req.user!.id },
+  });
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  res.json(project);
+}));
+
+app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) => {
+  const body = req.body || {};
+  const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
+  if (!name || !isMidiProjectData(body.data)) {
+    return res.status(400).json({ error: 'Project name and data are required' });
+  }
+
+  const project = await prisma.midiProject.create({
+    data: {
+      name,
+      data: body.data,
+      ownerId: req.user!.id,
+    },
+  });
+  res.status(201).json(project);
+}));
+
+app.put('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res) => {
+  const existing = await prisma.midiProject.findFirst({
+    where: { id: req.params.id, ownerId: req.user!.id },
+    select: { id: true },
+  });
+  if (!existing) return res.status(404).json({ error: 'Project not found' });
+
+  const body = req.body || {};
+  const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
+  if (!name || !isMidiProjectData(body.data)) {
+    return res.status(400).json({ error: 'Project name and data are required' });
+  }
+
+  const project = await prisma.midiProject.update({
+    where: { id: existing.id },
+    data: { name, data: body.data },
+  });
+  res.json(project);
+}));
+
+app.delete('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res) => {
+  const result = await prisma.midiProject.deleteMany({
+    where: { id: req.params.id, ownerId: req.user!.id },
+  });
+  if (result.count === 0) return res.status(404).json({ error: 'Project not found' });
+  res.status(204).send();
+}));
 
 // Admin middleware
 const requireAdmin = async (req: any, res: any, next: any) => {

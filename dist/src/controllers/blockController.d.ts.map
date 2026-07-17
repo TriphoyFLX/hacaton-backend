@@ -1,0 +1,1 @@
+{"version":3,"file":"blockController.d.ts","sourceRoot":"","sources":["../../../src/controllers/blockController.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,QAAQ,EAAE,MAAM,SAAS,CAAC;AAEnC,OAAO,EAAE,oBAAoB,EAAE,MAAM,UAAU,CAAC;AAEhD,wBAAgB,mBAAmB;qBACH,oBAAoB,OAAO,QAAQ;uBAoBjC,oBAAoB,OAAO,QAAQ;2BAe/B,oBAAoB,OAAO,QAAQ;4BAclC,oBAAoB,OAAO,QAAQ;EA6BzE"}
