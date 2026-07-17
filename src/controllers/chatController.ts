@@ -168,7 +168,7 @@ export async function createChat(req: AuthenticatedRequest, res: Response) {
       return res.status(403).json({ error: 'Невозможно начать чат с этим пользователем' });
     }
 
-    const otherUser = chat.users.find(u => u.user.id !== req.user!.id)?.user;
+    const otherUser = chat.users.find((u: { user: { id: string } }) => u.user.id !== req.user!.id)?.user;
 
     res.status(201).json(formatChat(chat, req.user.id, 0));
   } catch (error) {

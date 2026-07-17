@@ -1,6 +1,10 @@
 import { ChatType, PrismaClient } from '@prisma/client';
 import { messageRepository } from '../repositories/messageRepository';
 import { MessageWithSender } from '../types';
+import { chatRepository, ChatWithUsers } from '../repositories/chatRepository';
+import { userRepository } from '../repositories/userRepository';
+import { blockRepository } from '../repositories/blockRepository';
+import { validateMessageContent } from '../utils/messageValidation';
 
 const prisma = new PrismaClient();
 

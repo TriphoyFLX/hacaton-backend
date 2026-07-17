@@ -248,7 +248,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
 
         // Check if receiver is in chat for immediate delivery status
         const chatUsers = activeChatUsers.get(data.chatId);
-        const receiverInChat = chatUsers?.has(data.receiverId);
+        const receiverInChat = data.receiverId ? chatUsers?.has(data.receiverId) : false;
 
         if (receiverInChat) {
           // Mark as delivered immediately
