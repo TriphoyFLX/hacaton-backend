@@ -10,6 +10,16 @@ import fs from 'fs';
 import { createServer } from 'http';
 import { createProfileRouter } from './src/routes/profileRoutes';
 import { createFollowRouter } from './src/routes/followRoutes';
+import { createVerificationPayload, sendVerificationEmail } from './src/services/emailService';
+import {
+  exchangeGoogleCode,
+  exchangeVkCode,
+  findOrCreateOAuthUser,
+  frontendUrl,
+  googleAuthUrl,
+  oauthState,
+  vkAuthUrl,
+} from './src/services/oauthService';
 import { createChatRouter } from './src/routes/chatRoutes';
 import { createBlockRouter } from './src/routes/blockRoutes';
 import { createSocketServer, getUserOnlineStatus } from './src/websocket/socketServer';
@@ -66,92 +76,217 @@ app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(uploadsDir));
 
+const userPublicSelect = {
+  id: true,
+  username: true,
+  email: true,
+  birthDate: true,
+  agreedToTerms: true,
+  role: true,
+  emailVerified: true,
+  displayName: true,
+  avatar: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+function signAuthToken(userId: string, role?: string) {
+  return jwt.sign(
+    { userId, ...(role ? { role } : {}) },
+    process.env.JWT_SECRET || 'secret',
+    { expiresIn: '7d' }
+  );
+}
+
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, email, password, birthDate, agreedToTerms } = req.body;
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
 
-    if (!username || !email || !password || !birthDate || !agreedToTerms) {
+    if (!username || !normalizedEmail || !password || !birthDate || !agreedToTerms) {
       return res.status(400).json({ error: 'All fields required and terms must be accepted' });
+    }
+
+    if (!isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
     const existingUser = await prisma.user.findFirst({
       where: {
         OR: [
-          { email },
-          { username }
-        ]
+          { email: normalizedEmail },
+          { username },
+        ],
       },
       select: {
         id: true,
         email: true,
-        username: true
-      }
+        username: true,
+        emailVerified: true,
+      },
     });
 
     if (existingUser) {
-      if (existingUser.email === email) {
+      // Allow re-registration attempt for unverified accounts with same email
+      if (existingUser.email === normalizedEmail && !existingUser.emailVerified) {
+        const { code, expires } = createVerificationPayload();
+        const hashedPassword = await bcrypt.hash(password, 10);
+        await prisma.user.update({
+          where: { id: existingUser.id },
+          data: {
+            username,
+            password: hashedPassword,
+            birthDate: new Date(birthDate),
+            agreedToTerms: Boolean(agreedToTerms),
+            emailVerificationCode: code,
+            emailVerificationExpires: expires,
+          },
+        });
+        await sendVerificationEmail(normalizedEmail, code);
+        return res.status(200).json({
+          requiresVerification: true,
+          email: normalizedEmail,
+          message: 'Verification code sent to your email',
+        });
+      }
+      if (existingUser.email === normalizedEmail) {
         return res.status(400).json({ error: 'Email already exists' });
       }
       return res.status(400).json({ error: 'Username already exists' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = await prisma.user.create({
+    const { code, expires } = createVerificationPayload();
+
+    await prisma.user.create({
       data: {
         username,
-        email,
+        email: normalizedEmail,
         password: hashedPassword,
         birthDate: new Date(birthDate),
-        agreedToTerms
+        agreedToTerms: Boolean(agreedToTerms),
+        emailVerified: false,
+        emailVerificationCode: code,
+        emailVerificationExpires: expires,
       },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        birthDate: true,
-        agreedToTerms: true,
-        role: true,
-        createdAt: true,
-        updatedAt: true
-      }
     });
 
-    const token = jwt.sign(
-      { userId: user.id, role: user.role },
-      process.env.JWT_SECRET || 'secret',
-      { expiresIn: '7d' }
-    );
+    await sendVerificationEmail(normalizedEmail, code);
 
-    res.status(201).json({ user, token });
+    res.status(201).json({
+      requiresVerification: true,
+      email: normalizedEmail,
+      message: 'Verification code sent to your email',
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Registration failed' });
   }
 });
 
+app.post('/api/auth/verify-email', async (req, res) => {
+  try {
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
+
+    if (!email || !code) {
+      return res.status(400).json({ error: 'Email and code required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.emailVerified) {
+      const token = signAuthToken(user.id, user.role);
+      const { password: _, emailVerificationCode: __, ...publicUser } = user as any;
+      return res.json({ user: publicUser, token });
+    }
+
+    if (!user.emailVerificationCode || user.emailVerificationCode !== code) {
+      return res.status(400).json({ error: 'Invalid verification code' });
+    }
+
+    if (!user.emailVerificationExpires || user.emailVerificationExpires < new Date()) {
+      return res.status(400).json({ error: 'Verification code expired' });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerified: true,
+        emailVerificationCode: null,
+        emailVerificationExpires: null,
+      },
+      select: userPublicSelect,
+    });
+
+    const token = signAuthToken(updated.id, updated.role);
+    res.json({ user: updated, token });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+app.post('/api/auth/resend-code', async (req, res) => {
+  try {
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    if (!email) {
+      return res.status(400).json({ error: 'Email required' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (user.emailVerified) {
+      return res.status(400).json({ error: 'Email already verified' });
+    }
+
+    const { code, expires } = createVerificationPayload();
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerificationCode: code,
+        emailVerificationExpires: expires,
+      },
+    });
+    await sendVerificationEmail(email, code);
+
+    res.json({ message: 'Verification code resent', email });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to resend code' });
+  }
+});
+
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const { password } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password required' });
     }
 
-    const user = await prisma.user.findUnique({ 
+    const user = await prisma.user.findUnique({
       where: { email },
       select: {
-        id: true,
-        username: true,
-        email: true,
-        birthDate: true,
-        agreedToTerms: true,
-        role: true,
-        createdAt: true,
-        updatedAt: true,
-        password: true
-      }
+        ...userPublicSelect,
+        password: true,
+      },
     });
-    if (!user) {
+    if (!user || !user.password) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -160,12 +295,15 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = jwt.sign(
-      { userId: user.id },
-      process.env.JWT_SECRET || 'secret',
-      { expiresIn: '7d' }
-    );
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        error: 'Email not verified',
+        requiresVerification: true,
+        email: user.email,
+      });
+    }
 
+    const token = signAuthToken(user.id, user.role);
     const { password: _, ...userWithoutPassword } = user;
 
     res.json({ user: userWithoutPassword, token });
@@ -187,24 +325,85 @@ app.get('/api/auth/me', async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
-      select: {
-        id: true,
-        email: true,
-        username: true,
-        birthDate: true,
-        role: true,
-        createdAt: true,
-        updatedAt: true,
-      }
+      select: userPublicSelect,
     });
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    if (!user.emailVerified) {
+      return res.status(403).json({ error: 'Email not verified', requiresVerification: true, email: user.email });
+    }
+
     res.json(user);
   } catch (error) {
     res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+app.get('/api/auth/providers', (_req, res) => {
+  res.json({
+    google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    vk: Boolean(process.env.VK_CLIENT_ID && process.env.VK_CLIENT_SECRET),
+  });
+});
+
+app.get('/api/auth/google', (_req, res) => {
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    return res.status(503).json({ error: 'Google OAuth is not configured' });
+  }
+  const state = oauthState();
+  res.redirect(googleAuthUrl(state));
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+  try {
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    if (!code) {
+      return res.redirect(`${frontendUrl()}/login?error=google_denied`);
+    }
+    const profile = await exchangeGoogleCode(code);
+    const user = await findOrCreateOAuthUser({
+      email: profile.email,
+      name: profile.name,
+      picture: profile.picture,
+      googleId: profile.googleId,
+    });
+    const token = signAuthToken(user.id, user.role);
+    res.redirect(`${frontendUrl()}/auth/callback?token=${encodeURIComponent(token)}`);
+  } catch (error) {
+    console.error('Google OAuth error:', error);
+    res.redirect(`${frontendUrl()}/login?error=google_failed`);
+  }
+});
+
+app.get('/api/auth/vk', (_req, res) => {
+  if (!process.env.VK_CLIENT_ID || !process.env.VK_CLIENT_SECRET) {
+    return res.status(503).json({ error: 'VK OAuth is not configured' });
+  }
+  const state = oauthState();
+  res.redirect(vkAuthUrl(state));
+});
+
+app.get('/api/auth/vk/callback', async (req, res) => {
+  try {
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    if (!code) {
+      return res.redirect(`${frontendUrl()}/login?error=vk_denied`);
+    }
+    const profile = await exchangeVkCode(code);
+    const user = await findOrCreateOAuthUser({
+      email: profile.email,
+      name: profile.name,
+      picture: profile.picture,
+      vkId: profile.vkId,
+    });
+    const token = signAuthToken(user.id, user.role);
+    res.redirect(`${frontendUrl()}/auth/callback?token=${encodeURIComponent(token)}`);
+  } catch (error) {
+    console.error('VK OAuth error:', error);
+    res.redirect(`${frontendUrl()}/login?error=vk_failed`);
   }
 });
 
