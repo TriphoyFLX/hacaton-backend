@@ -14,10 +14,15 @@ import {
   MessageResponse,
 } from '../types';
 
-interface AuthenticatedSocket extends Socket {
+type AuthenticatedSocket = Socket<
+  ClientToServerEvents,
+  ServerToClientEvents,
+  InterServerEvents,
+  SocketData
+> & {
   userId?: string;
   username?: string;
-}
+};
 
 // Map of userId -> Set of socket IDs (for multiple device support)
 const userSockets = new Map<string, Set<string>>();

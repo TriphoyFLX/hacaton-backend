@@ -50,6 +50,7 @@ model User {
   createdBattles Battle[] @relation("CreatedBattles")
   battleParticipants BattleParticipant[]
   battleRecordings BattleRecording[]
+  battleRatings BattleRating[]
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
@@ -231,6 +232,7 @@ model Battle {
   creator     User                 @relation("CreatedBattles", fields: [creatorId], references: [id], onDelete: Cascade)
   participants BattleParticipant[]
   recordings  BattleRecording[]
+  ratings     BattleRating[]
 
   @@map("battles")
 }
@@ -265,6 +267,20 @@ model BattleRecording {
   user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("battle_recordings")
+}
+
+model BattleRating {
+  id        String   @id @default(cuid())
+  battleId  String
+  raterId   String
+  rating    Int
+  createdAt DateTime @default(now())
+
+  battle    Battle @relation(fields: [battleId], references: [id], onDelete: Cascade)
+  rater     User   @relation(fields: [raterId], references: [id], onDelete: Cascade)
+
+  @@unique([battleId, raterId])
+  @@map("battle_ratings")
 }
 
 model BattleJudge {

@@ -80,6 +80,11 @@ app.post('/api/auth/register', async (req, res) => {
           { email },
           { username }
         ]
+      },
+      select: {
+        id: true,
+        email: true,
+        username: true
       }
     });
 
@@ -186,9 +191,6 @@ app.get('/api/auth/me', async (req, res) => {
         id: true,
         email: true,
         username: true,
-        displayName: true,
-        avatar: true,
-        bio: true,
         birthDate: true,
         role: true,
         createdAt: true,
@@ -584,8 +586,6 @@ app.get('/api/soundtok/:id/comments', async (req, res) => {
           select: {
             id: true,
             username: true,
-            displayName: true,
-            avatar: true,
           }
         }
       },
@@ -626,8 +626,6 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
           select: {
             id: true,
             username: true,
-            displayName: true,
-            avatar: true,
           }
         }
       }
@@ -675,15 +673,11 @@ app.get('/api/search', async (req, res) => {
         where: {
           OR: [
             { username: { contains: q, mode: 'insensitive' } },
-            { displayName: { contains: q, mode: 'insensitive' } },
           ]
         },
         select: {
           id: true,
           username: true,
-          displayName: true,
-          avatar: true,
-          bio: true,
           createdAt: true
         },
         take: 10
@@ -1211,6 +1205,11 @@ app.patch('/api/battles/:id/status', authenticateToken, async (req: Authenticate
     
     const battleId = req.params.id;
     const { status } = req.body;
+
+    const validStatuses = ['WAITING', 'INVITING', 'SELECTING_BEAT', 'USER1_TURN', 'USER2_TURN', 'JUDGING', 'FINISHED', 'CANCELLED'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid battle status' });
+    }
     
     const battle = await prisma.battle.findUnique({
       where: { id: battleId }
@@ -1429,6 +1428,160 @@ app.get('/api/battles/:id/recordings/:recordingId/voice-blob', authenticateToken
   } catch (error) {
     console.error('Error getting voice blob:', error);
     res.status(500).json({ error: 'Failed to get voice blob' });
+  }
+});
+
+function buildPeerRatingResult(
+  battle: { creatorId: string; status: string },
+  ratings: { raterId: string; rating: number }[],
+  currentUserId: string
+) {
+  const creatorRating = ratings.find((r) => r.raterId === battle.creatorId)?.rating ?? null;
+  const opponentRatingRow = ratings.find((r) => r.raterId !== battle.creatorId);
+  const opponentRating = opponentRatingRow?.rating ?? null;
+  const creatorReceived = opponentRating;
+  const opponentReceived = creatorRating;
+  const bothRated = creatorRating !== null && opponentRating !== null;
+
+  let winner: 'USER1' | 'USER2' | 'DRAW' | undefined;
+  if (bothRated && creatorReceived !== null && opponentReceived !== null) {
+    if (creatorReceived > opponentReceived) winner = 'USER1';
+    else if (opponentReceived > creatorReceived) winner = 'USER2';
+    else winner = 'DRAW';
+  }
+
+  const hasRated = ratings.some((r) => r.raterId === currentUserId);
+
+  return {
+    creatorRating,
+    opponentRating,
+    creatorReceived,
+    opponentReceived,
+    bothRated,
+    hasRated,
+    winner,
+    user1Score: creatorReceived,
+    user2Score: opponentReceived,
+    status: battle.status
+  };
+}
+
+// Submit peer rating for opponent's track
+app.post('/api/battles/:id/rate', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const battleId = req.params.id;
+    const userId = req.user.id;
+    const rating = Number(req.body.rating);
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'Rating must be an integer from 1 to 5' });
+    }
+
+    const battle = await prisma.battle.findUnique({
+      where: { id: battleId },
+      include: {
+        participants: true,
+        ratings: true
+      }
+    });
+
+    if (!battle) {
+      return res.status(404).json({ error: 'Battle not found' });
+    }
+
+    const isParticipant =
+      battle.creatorId === userId ||
+      battle.participants.some((p) => p.userId === userId);
+
+    if (!isParticipant) {
+      return res.status(403).json({ error: 'You are not a participant in this battle' });
+    }
+
+    if (battle.status !== 'JUDGING' && battle.status !== 'FINISHED') {
+      return res.status(400).json({ error: 'Battle is not in judging phase' });
+    }
+
+    const existing = battle.ratings.find((r) => r.raterId === userId);
+    if (existing) {
+      return res.status(400).json({ error: 'You have already rated this battle' });
+    }
+
+    await prisma.battleRating.create({
+      data: {
+        battleId,
+        raterId: userId,
+        rating
+      }
+    });
+
+    const allRatings = await prisma.battleRating.findMany({
+      where: { battleId }
+    });
+
+    const result = buildPeerRatingResult(battle, allRatings, userId);
+
+    if (result.bothRated && result.winner) {
+      await prisma.battle.update({
+        where: { id: battleId },
+        data: {
+          status: 'FINISHED',
+          winner: result.winner,
+          judgedBy: 'peer',
+          judgedAt: new Date()
+        }
+      });
+      result.status = 'FINISHED';
+    }
+
+    res.json({
+      success: true,
+      message: result.bothRated ? 'Both players rated — battle finished' : 'Rating saved, waiting for opponent',
+      ...result
+    });
+  } catch (error) {
+    console.error('Error submitting battle rating:', error);
+    res.status(500).json({ error: 'Failed to submit rating' });
+  }
+});
+
+// Get peer ratings for a battle
+app.get('/api/battles/:id/ratings', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const battleId = req.params.id;
+    const userId = req.user.id;
+
+    const battle = await prisma.battle.findUnique({
+      where: { id: battleId },
+      include: {
+        participants: true,
+        ratings: true
+      }
+    });
+
+    if (!battle) {
+      return res.status(404).json({ error: 'Battle not found' });
+    }
+
+    const isParticipant =
+      battle.creatorId === userId ||
+      battle.participants.some((p) => p.userId === userId);
+
+    if (!isParticipant) {
+      return res.status(403).json({ error: 'You are not a participant in this battle' });
+    }
+
+    res.json(buildPeerRatingResult(battle, battle.ratings, userId));
+  } catch (error) {
+    console.error('Error fetching battle ratings:', error);
+    res.status(500).json({ error: 'Failed to fetch ratings' });
   }
 });
 
