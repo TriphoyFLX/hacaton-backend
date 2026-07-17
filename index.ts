@@ -10,7 +10,7 @@ import fs from 'fs';
 import { createServer } from 'http';
 import { createProfileRouter } from './src/routes/profileRoutes';
 import { createFollowRouter } from './src/routes/followRoutes';
-import { createVerificationPayload, sendVerificationEmail } from './src/services/emailService';
+import { createVerificationPayload, sendVerificationEmail, sendAdminNotification } from './src/services/emailService';
 import {
   exchangeGoogleCode,
   exchangeVkCode,
@@ -180,6 +180,10 @@ app.post('/api/auth/register', async (req, res) => {
     });
 
     await sendVerificationEmail(normalizedEmail, code);
+    void sendAdminNotification(
+      'Новая регистрация',
+      `Username: ${username}\nEmail: ${normalizedEmail}\nОжидает подтверждения email.`,
+    );
 
     res.status(201).json({
       requiresVerification: true,
@@ -229,6 +233,11 @@ app.post('/api/auth/verify-email', async (req, res) => {
       },
       select: userPublicSelect,
     });
+
+    void sendAdminNotification(
+      'Email подтверждён',
+      `Username: ${updated.username}\nEmail: ${updated.email}\nПользователь активирован.`,
+    );
 
     const token = signAuthToken(updated.id, updated.role);
     res.json({ user: updated, token });

@@ -4,8 +4,16 @@ function generateCode(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
-function mailFrom(): string {
+function noreplyFrom(): string {
   return process.env.EMAIL_FROM || process.env.SMTP_FROM || 'SoundLab <noreply@soundlab-studio.ru>';
+}
+
+function placementFrom(): string {
+  return process.env.EMAIL_FROM_PLACEMENT || 'SoundLab Placement <placement@soundlab-studio.ru>';
+}
+
+function notificationTo(): string | null {
+  return process.env.NOTIFICATION_EMAIL || null;
 }
 
 function emailHtml(code: string): string {
@@ -21,33 +29,6 @@ function emailHtml(code: string): string {
 
 function emailText(code: string): string {
   return `Ваш код подтверждения: ${code}\n\nКод действует 15 минут.\nЕсли вы не регистрировались на SoundLab — просто игнорируйте письмо.`;
-}
-
-async function sendViaResend(to: string, code: string): Promise<boolean> {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return false;
-
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: mailFrom(),
-      to: [to],
-      subject: 'Код подтверждения SoundLab',
-      html: emailHtml(code),
-      text: emailText(code),
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Resend failed (${res.status}): ${body}`);
-  }
-
-  return true;
 }
 
 function getTransporter() {
@@ -67,26 +48,88 @@ function getTransporter() {
   });
 }
 
-export async function sendVerificationEmail(email: string, code: string): Promise<void> {
-  // Prefer Resend (transactional)
+async function sendMail(opts: {
+  from: string;
+  to: string | string[];
+  subject: string;
+  text: string;
+  html?: string;
+}): Promise<void> {
+  const to = Array.isArray(opts.to) ? opts.to : [opts.to];
+
   if (process.env.RESEND_API_KEY) {
-    await sendViaResend(email, code);
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: opts.from,
+        to,
+        subject: opts.subject,
+        html: opts.html,
+        text: opts.text,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Resend failed (${res.status}): ${body}`);
+    }
     return;
   }
 
   const transporter = getTransporter();
   if (!transporter) {
-    console.warn(`[email] No Resend/SMTP configured. Verification code for ${email}: ${code}`);
+    console.warn(`[email] No mail provider. Would send to ${to.join(', ')}: ${opts.subject}\n${opts.text}`);
     return;
   }
 
   await transporter.sendMail({
-    from: mailFrom(),
+    from: opts.from,
+    to: to.join(', '),
+    subject: opts.subject,
+    text: opts.text,
+    html: opts.html,
+  });
+}
+
+export async function sendVerificationEmail(email: string, code: string): Promise<void> {
+  await sendMail({
+    from: noreplyFrom(),
     to: email,
     subject: 'Код подтверждения SoundLab',
     text: emailText(code),
     html: emailHtml(code),
   });
+}
+
+/** Admin / placement notifications → your personal inbox */
+export async function sendAdminNotification(subject: string, text: string): Promise<void> {
+  const to = notificationTo();
+  if (!to) {
+    console.warn(`[email] NOTIFICATION_EMAIL not set. Skip: ${subject}`);
+    return;
+  }
+
+  try {
+    await sendMail({
+      from: placementFrom(),
+      to,
+      subject: `[SoundLab] ${subject}`,
+      text,
+      html: `
+        <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#111;color:#f0ede8;border-radius:12px">
+          <h2 style="margin:0 0 8px">SoundLab</h2>
+          <p style="color:#888;margin:0 0 16px;font-size:13px">${subject}</p>
+          <pre style="white-space:pre-wrap;font-family:inherit;background:#1a1a1a;padding:16px;border-radius:8px;margin:0">${text}</pre>
+        </div>
+      `,
+    });
+  } catch (e) {
+    console.error('[email] Admin notification failed:', e);
+  }
 }
 
 export function createVerificationPayload() {

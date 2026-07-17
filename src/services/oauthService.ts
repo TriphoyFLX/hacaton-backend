@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
+import { sendAdminNotification } from './emailService';
 
 const prisma = new PrismaClient();
 
@@ -235,6 +236,12 @@ export async function findOrCreateOAuthUser(input: {
       avatar: input.picture,
     },
   });
+
+  const via = input.googleId ? 'Google' : input.vkId ? 'VK' : 'OAuth';
+  void sendAdminNotification(
+    `Новый пользователь (${via})`,
+    `Username: ${username}\nEmail: ${email}\nПровайдер: ${via}`,
+  );
 
   return user;
 }
