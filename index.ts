@@ -79,7 +79,7 @@ const upload = multer({
   }
 });
 
-const MIDI_SAMPLE_MAX_BYTES = 3 * 1024 * 1024;
+const MIDI_SAMPLE_MAX_BYTES = 6 * 1024 * 1024;
 const midiSampleUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MIDI_SAMPLE_MAX_BYTES, files: 1 },
@@ -101,7 +101,7 @@ const receiveMidiSample = (req: Request, res: Response, next: NextFunction) => {
   midiSampleUpload.single('sample')(req, res, (error: unknown) => {
     if (!error) return next();
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: 'Sample must not exceed 3 MB' });
+      return res.status(413).json({ error: 'Sample must not exceed 6 MB' });
     }
     console.warn('midi sample upload error:', error);
     return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid sample' });
