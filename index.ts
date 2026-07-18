@@ -23,10 +23,17 @@ import {
 import { createChatRouter } from './src/routes/chatRoutes';
 import { createBlockRouter } from './src/routes/blockRoutes';
 import { createSocketServer, getUserOnlineStatus } from './src/websocket/socketServer';
+import { rateLimitMiddleware } from './src/utils/rateLimiter';
+import { corsOptions, requireJwtSecret, securityHeaders } from './src/middleware/security';
 
 dotenv.config();
+const JWT_SECRET = requireJwtSecret();
 const app = express();
 const prisma = new PrismaClient();
+
+// Behind nginx — trust X-Forwarded-For for rate limits / logs
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -94,10 +101,30 @@ const receiveMidiSample = (req: Request, res: Response, next: NextFunction) => {
   });
 };
 
-app.use(cors());
-
+app.use(securityHeaders);
+app.use(cors(corsOptions()));
 app.use(express.json({ limit: '5mb' }));
 app.use('/uploads', express.static(uploadsDir));
+
+const authRateLimit = rateLimitMiddleware({
+  keyPrefix: 'auth',
+  max: 20,
+  windowMs: 15 * 60 * 1000,
+  message: 'Too many auth attempts. Try again in a few minutes.',
+});
+const authStrictRateLimit = rateLimitMiddleware({
+  keyPrefix: 'auth-strict',
+  max: 8,
+  windowMs: 15 * 60 * 1000,
+  message: 'Too many login attempts. Try again later.',
+});
+const generalApiRateLimit = rateLimitMiddleware({
+  keyPrefix: 'api',
+  max: 300,
+  windowMs: 60 * 1000,
+  message: 'Rate limit exceeded',
+});
+app.use('/api', generalApiRateLimit);
 
 const userPublicSelect = {
   id: true,
@@ -116,7 +143,7 @@ const userPublicSelect = {
 function signAuthToken(userId: string, role?: string) {
   return jwt.sign(
     { userId, ...(role ? { role } : {}) },
-    process.env.JWT_SECRET || 'secret',
+    JWT_SECRET,
     { expiresIn: '7d' }
   );
 }
@@ -125,7 +152,7 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', authRateLimit, async (req, res) => {
   try {
     const { username, email, password, birthDate, agreedToTerms } = req.body;
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
@@ -161,7 +188,7 @@ app.post('/api/auth/register', async (req, res) => {
       // Allow re-registration attempt for unverified accounts with same email
       if (existingUser.email === normalizedEmail && !existingUser.emailVerified) {
         const { code, expires } = createVerificationPayload();
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const hashedPassword = await bcrypt.hash(password, 12);
         await prisma.user.update({
           where: { id: existingUser.id },
           data: {
@@ -186,7 +213,7 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Username already exists' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
     const { code, expires } = createVerificationPayload();
 
     await prisma.user.create({
@@ -219,7 +246,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-app.post('/api/auth/verify-email', async (req, res) => {
+app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
   try {
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
@@ -270,7 +297,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
   }
 });
 
-app.post('/api/auth/resend-code', async (req, res) => {
+app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
   try {
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     if (!email) {
@@ -302,7 +329,7 @@ app.post('/api/auth/resend-code', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
   try {
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const { password } = req.body;
@@ -353,7 +380,7 @@ app.get('/api/auth/me', async (req, res) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as { userId: string };
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
@@ -445,7 +472,7 @@ const getUserFromToken = (authHeader?: string) => {
   
   const token = authHeader.replace('Bearer ', '');
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
     return decoded.userId;
   } catch {
     return null;
@@ -458,7 +485,7 @@ const isAdmin = async (authHeader?: string) => {
   
   const token = authHeader.replace('Bearer ', '');
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: { role: true }
@@ -492,7 +519,7 @@ const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any)
 
   const token = authHeader.replace('Bearer ', '');
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret') as { userId: string; role: string };
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string; role: string };
     console.log('Auth middleware: Token decoded, userId:', decoded.userId);
     
     const user = await prisma.user.findUnique({
@@ -2138,11 +2165,12 @@ app.get('/api/check-generation/:id', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 5002;
+const PORT = Number(process.env.PORT || 5002);
+const HOST = process.env.HOST || '127.0.0.1';
 const httpServer = createServer(app);
 createSocketServer(httpServer);
 
-httpServer.listen(PORT, () => {
-  console.log(`Server on http://localhost:${PORT}`);
-  console.log(`WebSocket ready on ws://localhost:${PORT}`);
+httpServer.listen(PORT, HOST, () => {
+  console.log(`Server on http://${HOST}:${PORT}`);
+  console.log(`WebSocket ready on ws://${HOST}:${PORT}`);
 });

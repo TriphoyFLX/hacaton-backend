@@ -6,6 +6,7 @@ import { chatRepository } from '../repositories/chatRepository';
 import { profileService } from '../services/profileService';
 import { validateMessageContent } from '../utils/messageValidation';
 import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
+import { getAllowedOrigins, requireJwtSecret } from '../middleware/security';
 import {
   ServerToClientEvents,
   ClientToServerEvents,
@@ -36,11 +37,12 @@ export function getIO(): SocketIOServer | null {
 }
 
 export function createSocketServer(httpServer: HttpServer): SocketIOServer {
+  const JWT_SECRET = requireJwtSecret();
   const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>(
     httpServer,
     {
       cors: {
-        origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+        origin: getAllowedOrigins(),
         methods: ['GET', 'POST'],
         credentials: true,
       },
@@ -64,7 +66,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
 
       const decoded = jwt.verify(
         token as string,
-        process.env.JWT_SECRET || 'secret'
+        JWT_SECRET
       ) as { userId: string; username: string };
 
       // Verify user exists
