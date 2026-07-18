@@ -675,13 +675,20 @@ app.put('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res)
 
   const body = req.body || {};
   const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
-  if (!name || !isMidiProjectData(body.data)) {
-    return res.status(400).json({ error: 'Project name and data are required' });
+  if (!name) {
+    return res.status(400).json({ error: 'Project name is required' });
+  }
+  const hasData = isMidiProjectData(body.data);
+  if (body.data !== undefined && !hasData) {
+    return res.status(400).json({ error: 'Invalid project data' });
   }
 
   const project = await prisma.midiProject.update({
     where: { id: existing.id },
-    data: { name, data: body.data },
+    data: {
+      name,
+      ...(hasData ? { data: body.data } : {}),
+    },
   });
   res.json(project);
 }));
