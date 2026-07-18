@@ -84,9 +84,15 @@ const midiSampleUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MIDI_SAMPLE_MAX_BYTES, files: 1 },
   fileFilter: (_req, file, cb) => {
-    const isAudio = file.mimetype.startsWith('audio/')
-      || /\.(mp3|wav|ogg|flac|m4a|aac|aiff?|webm)$/i.test(file.originalname);
-    if (!isAudio) return cb(new Error('Only audio files are allowed'));
+    const name = file.originalname || '';
+    const mime = (file.mimetype || '').toLowerCase();
+    const isAudio = mime.startsWith('audio/')
+      || mime === 'application/octet-stream'
+      || /\.(mp3|wav|ogg|flac|m4a|aac|aiff?|webm)$/i.test(name);
+    if (!isAudio) {
+      console.warn('Rejected midi sample:', name, 'mimetype:', file.mimetype);
+      return cb(new Error('Only audio files are allowed'));
+    }
     cb(null, true);
   },
 });
@@ -97,6 +103,7 @@ const receiveMidiSample = (req: Request, res: Response, next: NextFunction) => {
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({ error: 'Sample must not exceed 3 MB' });
     }
+    console.warn('midi sample upload error:', error);
     return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid sample' });
   });
 };
