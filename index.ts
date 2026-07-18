@@ -113,6 +113,10 @@ app.use(cors(corsOptions()));
 app.use(express.json({ limit: '5mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, ts: Date.now() });
+});
+
 const authRateLimit = rateLimitMiddleware({
   keyPrefix: 'auth',
   max: 20,
@@ -127,11 +131,14 @@ const authStrictRateLimit = rateLimitMiddleware({
 });
 const generalApiRateLimit = rateLimitMiddleware({
   keyPrefix: 'api',
-  max: 300,
+  max: 600,
   windowMs: 60 * 1000,
   message: 'Rate limit exceeded',
 });
-app.use('/api', generalApiRateLimit);
+app.use('/api', (req, res, next) => {
+  if (req.path === '/health') return next();
+  return generalApiRateLimit(req, res, next);
+});
 
 const userPublicSelect = {
   id: true,
