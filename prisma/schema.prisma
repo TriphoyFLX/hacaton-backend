@@ -23,6 +23,17 @@ enum ChatType {
   GROUP
 }
 
+enum PresetStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum PresetPurchaseStatus {
+  PAID
+  REFUNDED
+}
+
 model User {
   id         String    @id @default(cuid())
   email      String    @unique
@@ -62,6 +73,8 @@ model User {
   battleRatings BattleRating[]
   midiProjects MidiProject[]
   midiSamples MidiSample[]
+  presets     Preset[]         @relation("PresetSeller")
+  presetPurchases PresetPurchase[] @relation("PresetBuyer")
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
@@ -69,6 +82,50 @@ model User {
   blockedBy Block[] @relation("UserBlockedBy")
 
   @@map("users")
+}
+
+model Preset {
+  id              String       @id @default(cuid())
+  sellerId        String
+  title           String
+  description     String       @db.Text
+  priceCents      Int          @default(0)
+  currency        String       @default("RUB")
+  tags            String[]     @default([])
+  status          PresetStatus @default(DRAFT)
+  packageKey      String?
+  packageName     String?
+  packageSize     Int?
+  previewUrl      String?
+  coverUrl        String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  seller          User             @relation("PresetSeller", fields: [sellerId], references: [id], onDelete: Cascade)
+  purchases       PresetPurchase[]
+
+  @@index([status, createdAt])
+  @@index([sellerId, updatedAt])
+  @@map("presets")
+}
+
+model PresetPurchase {
+  id          String               @id @default(cuid())
+  buyerId     String
+  presetId    String
+  amountCents Int
+  currency    String
+  status      PresetPurchaseStatus @default(PAID)
+  provider    String               @default("demo")
+  providerRef String?
+  purchasedAt DateTime             @default(now())
+
+  buyer       User   @relation("PresetBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
+  preset      Preset @relation(fields: [presetId], references: [id], onDelete: Cascade)
+
+  @@unique([buyerId, presetId])
+  @@index([presetId, status])
+  @@map("preset_purchases")
 }
 
 model MidiProject {

@@ -10,6 +10,7 @@ import fs from 'fs';
 import { createServer } from 'http';
 import { createProfileRouter } from './src/routes/profileRoutes';
 import { createFollowRouter } from './src/routes/followRoutes';
+import { createPresetRouter } from './src/routes/presetRoutes';
 import { createVerificationPayload, sendVerificationEmail, sendAdminNotification } from './src/services/emailService';
 import {
   exchangeGoogleCode,
@@ -39,6 +40,10 @@ app.disable('x-powered-by');
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+}
+const privatePresetsDir = path.join(__dirname, 'private-presets');
+if (!fs.existsSync(privatePresetsDir)) {
+  fs.mkdirSync(privatePresetsDir, { recursive: true });
 }
 
 // Configure multer for file uploads
@@ -757,6 +762,7 @@ app.use('/api/profile', createProfileRouter(authenticateToken, uploadsDir));
 app.use('/api/follows', createFollowRouter(authenticateToken));
 app.use('/api/chats', createChatRouter(authenticateToken));
 app.use('/api/blocks', createBlockRouter(authenticateToken));
+app.use('/api/presets', createPresetRouter(prisma, authenticateToken, uploadsDir, privatePresetsDir));
 
 // Create post with media
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
