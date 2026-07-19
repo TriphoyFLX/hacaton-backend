@@ -129,6 +129,12 @@ const authStrictRateLimit = rateLimitMiddleware({
   windowMs: 15 * 60 * 1000,
   message: 'Too many login attempts. Try again later.',
 });
+const adminRateLimit = rateLimitMiddleware({
+  keyPrefix: 'admin',
+  max: 60,
+  windowMs: 60 * 1000,
+  message: 'Too many admin requests. Slow down.',
+});
 const generalApiRateLimit = rateLimitMiddleware({
   keyPrefix: 'api',
   max: 600,
@@ -139,6 +145,7 @@ app.use('/api', (req, res, next) => {
   if (req.path === '/health') return next();
   return generalApiRateLimit(req, res, next);
 });
+app.use('/api/admin', adminRateLimit);
 
 const userPublicSelect = {
   id: true,
@@ -701,12 +708,49 @@ app.delete('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, r
   res.status(204).send();
 }));
 
-// Admin middleware
-const requireAdmin = async (req: any, res: any, next: any) => {
-  if (!(await isAdmin(req.headers.authorization))) {
-    return res.status(403).json({ error: 'Admin access required' });
+// Admin middleware — always re-check role from DB (never trust JWT.role alone)
+const requireAdmin = async (req: AuthenticatedRequest, res: any, next: any) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: 'No token provided' });
   }
-  next();
+
+  const token = authHeader.replace(/^Bearer\s+/i, '');
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string };
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        role: true,
+        createdAt: true,
+        emailVerified: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    if (!user.emailVerified) {
+      return res.status(403).json({ error: 'Email not verified' });
+    }
+    if (user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    req.user = {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      createdAt: user.createdAt,
+    };
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
 };
 
 app.use('/api/profile', createProfileRouter(authenticateToken, uploadsDir));
@@ -1169,9 +1213,22 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
+app.delete('/api/admin/users/:id', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
     const userId = req.params.id;
+    if (req.user?.id === userId) {
+      return res.status(400).json({ error: 'Cannot delete your own admin account' });
+    }
+    const target = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+    if (!target) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (target.role === 'ADMIN') {
+      return res.status(403).json({ error: 'Cannot delete another admin account' });
+    }
     await prisma.user.delete({ where: { id: userId } });
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
@@ -1179,11 +1236,23 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.patch('/api/admin/users/:id/ban', requireAdmin, async (req, res) => {
+app.patch('/api/admin/users/:id/ban', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
     const userId = req.params.id;
-    // В реальном приложении здесь можно добавить поле banned в User model
-    // Пока просто удаляем пользователя как пример
+    if (req.user?.id === userId) {
+      return res.status(400).json({ error: 'Cannot ban your own admin account' });
+    }
+    const target = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+    if (!target) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (target.role === 'ADMIN') {
+      return res.status(403).json({ error: 'Cannot ban another admin account' });
+    }
+    // Soft-ban via role demotion isn't available; remove account content access by deletion for now
     await prisma.user.delete({ where: { id: userId } });
     res.json({ message: 'User banned successfully' });
   } catch (error) {
@@ -1662,7 +1731,7 @@ app.post('/api/upload/beat', authenticateToken, upload.single('beat'), async (re
       return res.status(400).json({ error: 'No beat file uploaded' });
     }
 
-    const fileUrl = `http://localhost:5002/uploads/${req.file.filename}`;
+    const fileUrl = `/uploads/${req.file.filename}`;
     console.log('Debug: Beat uploaded with URL:', fileUrl);
     res.json({ url: fileUrl });
   } catch (error) {
