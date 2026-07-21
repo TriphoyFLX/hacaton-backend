@@ -16,13 +16,21 @@ const http_1 = require("http");
 const profileRoutes_1 = require("./src/routes/profileRoutes");
 const followRoutes_1 = require("./src/routes/followRoutes");
 const emailService_1 = require("./src/services/emailService");
+const planService_1 = require("./src/services/planService");
+const yookassaService_1 = require("./src/services/yookassaService");
+const plans_1 = require("./src/config/plans");
 const oauthService_1 = require("./src/services/oauthService");
 const chatRoutes_1 = require("./src/routes/chatRoutes");
 const blockRoutes_1 = require("./src/routes/blockRoutes");
 const socketServer_1 = require("./src/websocket/socketServer");
+const rateLimiter_1 = require("./src/utils/rateLimiter");
+const security_1 = require("./src/middleware/security");
 dotenv_1.default.config();
+const JWT_SECRET = (0, security_1.requireJwtSecret)();
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 const uploadsDir = path_1.default.join(__dirname, 'uploads');
 if (!fs_1.default.existsSync(uploadsDir)) {
     fs_1.default.mkdirSync(uploadsDir, { recursive: true });
@@ -59,15 +67,20 @@ const upload = (0, multer_1.default)({
         }
     }
 });
-const MIDI_SAMPLE_MAX_BYTES = 3 * 1024 * 1024;
+const MIDI_SAMPLE_MAX_BYTES = 6 * 1024 * 1024;
 const midiSampleUpload = (0, multer_1.default)({
     storage: multer_1.default.memoryStorage(),
     limits: { fileSize: MIDI_SAMPLE_MAX_BYTES, files: 1 },
     fileFilter: (_req, file, cb) => {
-        const isAudio = file.mimetype.startsWith('audio/')
-            || /\.(mp3|wav|ogg|flac|m4a|aac|aiff?|webm)$/i.test(file.originalname);
-        if (!isAudio)
+        const name = file.originalname || '';
+        const mime = (file.mimetype || '').toLowerCase();
+        const isAudio = mime.startsWith('audio/')
+            || mime === 'application/octet-stream'
+            || /\.(mp3|wav|ogg|flac|m4a|aac|aiff?|webm)$/i.test(name);
+        if (!isAudio) {
+            console.warn('Rejected midi sample:', name, 'mimetype:', file.mimetype);
             return cb(new Error('Only audio files are allowed'));
+        }
         cb(null, true);
     },
 });
@@ -76,14 +89,49 @@ const receiveMidiSample = (req, res, next) => {
         if (!error)
             return next();
         if (error instanceof multer_1.default.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-            return res.status(413).json({ error: 'Sample must not exceed 3 MB' });
+            return res.status(413).json({ error: 'Sample must not exceed 6 MB' });
         }
+        console.warn('midi sample upload error:', error);
         return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid sample' });
     });
 };
-app.use((0, cors_1.default)());
+app.use(security_1.securityHeaders);
+app.use((0, cors_1.default)((0, security_1.corsOptions)()));
 app.use(express_1.default.json({ limit: '5mb' }));
 app.use('/uploads', express_1.default.static(uploadsDir));
+app.get('/api/health', (_req, res) => {
+    res.json({ ok: true, ts: Date.now() });
+});
+const authRateLimit = (0, rateLimiter_1.rateLimitMiddleware)({
+    keyPrefix: 'auth',
+    max: 20,
+    windowMs: 15 * 60 * 1000,
+    message: 'Too many auth attempts. Try again in a few minutes.',
+});
+const authStrictRateLimit = (0, rateLimiter_1.rateLimitMiddleware)({
+    keyPrefix: 'auth-strict',
+    max: 8,
+    windowMs: 15 * 60 * 1000,
+    message: 'Too many login attempts. Try again later.',
+});
+const adminRateLimit = (0, rateLimiter_1.rateLimitMiddleware)({
+    keyPrefix: 'admin',
+    max: 60,
+    windowMs: 60 * 1000,
+    message: 'Too many admin requests. Slow down.',
+});
+const generalApiRateLimit = (0, rateLimiter_1.rateLimitMiddleware)({
+    keyPrefix: 'api',
+    max: 600,
+    windowMs: 60 * 1000,
+    message: 'Rate limit exceeded',
+});
+app.use('/api', (req, res, next) => {
+    if (req.path === '/health')
+        return next();
+    return generalApiRateLimit(req, res, next);
+});
+app.use('/api/admin', adminRateLimit);
 const userPublicSelect = {
     id: true,
     username: true,
@@ -94,16 +142,19 @@ const userPublicSelect = {
     emailVerified: true,
     displayName: true,
     avatar: true,
+    plan: true,
+    planExpiresAt: true,
+    tokenBalance: true,
     createdAt: true,
     updatedAt: true,
 };
 function signAuthToken(userId, role) {
-    return jsonwebtoken_1.default.sign({ userId, ...(role ? { role } : {}) }, process.env.JWT_SECRET || 'secret', { expiresIn: '7d' });
+    return jsonwebtoken_1.default.sign({ userId, ...(role ? { role } : {}) }, JWT_SECRET, { expiresIn: '7d' });
 }
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', authRateLimit, async (req, res) => {
     try {
         const { username, email, password, birthDate, agreedToTerms } = req.body;
         const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
@@ -133,7 +184,7 @@ app.post('/api/auth/register', async (req, res) => {
         if (existingUser) {
             if (existingUser.email === normalizedEmail && !existingUser.emailVerified) {
                 const { code, expires } = (0, emailService_1.createVerificationPayload)();
-                const hashedPassword = await bcryptjs_1.default.hash(password, 10);
+                const hashedPassword = await bcryptjs_1.default.hash(password, 12);
                 await prisma.user.update({
                     where: { id: existingUser.id },
                     data: {
@@ -157,7 +208,7 @@ app.post('/api/auth/register', async (req, res) => {
             }
             return res.status(400).json({ error: 'Username already exists' });
         }
-        const hashedPassword = await bcryptjs_1.default.hash(password, 10);
+        const hashedPassword = await bcryptjs_1.default.hash(password, 12);
         const { code, expires } = (0, emailService_1.createVerificationPayload)();
         await prisma.user.create({
             data: {
@@ -184,7 +235,7 @@ app.post('/api/auth/register', async (req, res) => {
         res.status(500).json({ error: 'Registration failed' });
     }
 });
-app.post('/api/auth/verify-email', async (req, res) => {
+app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
     try {
         const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
         const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
@@ -224,7 +275,7 @@ app.post('/api/auth/verify-email', async (req, res) => {
         res.status(500).json({ error: 'Verification failed' });
     }
 });
-app.post('/api/auth/resend-code', async (req, res) => {
+app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
     try {
         const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
         if (!email) {
@@ -253,7 +304,7 @@ app.post('/api/auth/resend-code', async (req, res) => {
         res.status(500).json({ error: 'Failed to resend code' });
     }
 });
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
     try {
         const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
         const { password } = req.body;
@@ -297,7 +348,7 @@ app.get('/api/auth/me', async (req, res) => {
             return res.status(401).json({ error: 'No token' });
         }
         const token = authHeader.split(' ')[1];
-        const decoded = jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET || 'secret');
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
         const user = await prisma.user.findUnique({
             where: { id: decoded.userId },
             select: userPublicSelect,
@@ -381,7 +432,7 @@ const getUserFromToken = (authHeader) => {
         return null;
     const token = authHeader.replace('Bearer ', '');
     try {
-        const decoded = jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET || 'secret');
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
         return decoded.userId;
     }
     catch {
@@ -393,7 +444,7 @@ const isAdmin = async (authHeader) => {
         return false;
     const token = authHeader.replace('Bearer ', '');
     try {
-        const decoded = jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET || 'secret');
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
         const user = await prisma.user.findUnique({
             where: { id: decoded.userId },
             select: { role: true }
@@ -413,7 +464,7 @@ const authenticateToken = async (req, res, next) => {
     }
     const token = authHeader.replace('Bearer ', '');
     try {
-        const decoded = jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET || 'secret');
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
         console.log('Auth middleware: Token decoded, userId:', decoded.userId);
         const user = await prisma.user.findUnique({
             where: { id: decoded.userId },
@@ -519,6 +570,12 @@ app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) =>
     if (!name || !isMidiProjectData(body.data)) {
         return res.status(400).json({ error: 'Project name and data are required' });
     }
+    try {
+        await (0, planService_1.assertCanCreateMidiProject)(req.user.id);
+    }
+    catch (e) {
+        return res.status(e.status || 402).json({ error: e.message, code: e.code });
+    }
     const project = await prisma.midiProject.create({
         data: {
             name,
@@ -526,6 +583,7 @@ app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) =>
             ownerId: req.user.id,
         },
     });
+    await (0, planService_1.recordMidiCloudSave)(req.user.id);
     res.status(201).json(project);
 }));
 app.put('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res) => {
@@ -537,12 +595,19 @@ app.put('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res)
         return res.status(404).json({ error: 'Project not found' });
     const body = req.body || {};
     const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
-    if (!name || !isMidiProjectData(body.data)) {
-        return res.status(400).json({ error: 'Project name and data are required' });
+    if (!name) {
+        return res.status(400).json({ error: 'Project name is required' });
+    }
+    const hasData = isMidiProjectData(body.data);
+    if (body.data !== undefined && !hasData) {
+        return res.status(400).json({ error: 'Invalid project data' });
     }
     const project = await prisma.midiProject.update({
         where: { id: existing.id },
-        data: { name, data: body.data },
+        data: {
+            name,
+            ...(hasData ? { data: body.data } : {}),
+        },
     });
     res.json(project);
 }));
@@ -555,10 +620,45 @@ app.delete('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, r
     res.status(204).send();
 }));
 const requireAdmin = async (req, res, next) => {
-    if (!(await isAdmin(req.headers.authorization))) {
-        return res.status(403).json({ error: 'Admin access required' });
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        return res.status(401).json({ error: 'No token provided' });
     }
-    next();
+    const token = authHeader.replace(/^Bearer\s+/i, '');
+    try {
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
+        const user = await prisma.user.findUnique({
+            where: { id: decoded.userId },
+            select: {
+                id: true,
+                username: true,
+                email: true,
+                role: true,
+                createdAt: true,
+                emailVerified: true,
+            },
+        });
+        if (!user) {
+            return res.status(401).json({ error: 'User not found' });
+        }
+        if (!user.emailVerified) {
+            return res.status(403).json({ error: 'Email not verified' });
+        }
+        if (user.role !== 'ADMIN') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        req.user = {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            createdAt: user.createdAt,
+        };
+        next();
+    }
+    catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
 };
 app.use('/api/profile', (0, profileRoutes_1.createProfileRouter)(authenticateToken, uploadsDir));
 app.use('/api/follows', (0, followRoutes_1.createFollowRouter)(authenticateToken));
@@ -966,6 +1066,19 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
 app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
     try {
         const userId = req.params.id;
+        if (req.user?.id === userId) {
+            return res.status(400).json({ error: 'Cannot delete your own admin account' });
+        }
+        const target = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, role: true },
+        });
+        if (!target) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        if (target.role === 'ADMIN') {
+            return res.status(403).json({ error: 'Cannot delete another admin account' });
+        }
         await prisma.user.delete({ where: { id: userId } });
         res.json({ message: 'User deleted successfully' });
     }
@@ -976,6 +1089,19 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
 app.patch('/api/admin/users/:id/ban', requireAdmin, async (req, res) => {
     try {
         const userId = req.params.id;
+        if (req.user?.id === userId) {
+            return res.status(400).json({ error: 'Cannot ban your own admin account' });
+        }
+        const target = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, role: true },
+        });
+        if (!target) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        if (target.role === 'ADMIN') {
+            return res.status(403).json({ error: 'Cannot ban another admin account' });
+        }
         await prisma.user.delete({ where: { id: userId } });
         res.json({ message: 'User banned successfully' });
     }
@@ -1402,7 +1528,7 @@ app.post('/api/upload/beat', authenticateToken, upload.single('beat'), async (re
         if (!req.file) {
             return res.status(400).json({ error: 'No beat file uploaded' });
         }
-        const fileUrl = `http://localhost:5002/uploads/${req.file.filename}`;
+        const fileUrl = `/uploads/${req.file.filename}`;
         console.log('Debug: Beat uploaded with URL:', fileUrl);
         res.json({ url: fileUrl });
     }
@@ -1760,11 +1886,18 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Failed to judge battle' });
     }
 });
-app.post('/api/generate-music', async (req, res) => {
+app.post('/api/generate-music', authenticateToken, async (req, res) => {
     try {
         const { title, tags, prompt, translate_input, model } = req.body;
         if (!title || !tags) {
             return res.status(400).json({ error: 'Title and tags are required' });
+        }
+        let tokenBalanceLeft;
+        try {
+            tokenBalanceLeft = await (0, planService_1.consumeAiGenerationTokens)(req.user.id);
+        }
+        catch (e) {
+            return res.status(e.status || 402).json({ error: e.message, code: e.code });
         }
         const apiKey = process.env.SUNO_API_KEY;
         if (!apiKey) {
@@ -1788,10 +1921,14 @@ app.post('/api/generate-music', async (req, res) => {
         });
         if (!response.ok) {
             const errorText = await response.text();
+            await prisma.user.update({
+                where: { id: req.user.id },
+                data: { tokenBalance: { increment: plans_1.TOKENS_PER_GENERATION } },
+            });
             throw new Error(`Suno API error: ${response.status} - ${errorText}`);
         }
         const data = await response.json();
-        res.json(data);
+        res.json({ ...data, tokenBalance: tokenBalanceLeft, tokensCharged: plans_1.TOKENS_PER_GENERATION });
     }
     catch (error) {
         console.error('Generation error:', error);
@@ -1800,7 +1937,7 @@ app.post('/api/generate-music', async (req, res) => {
         });
     }
 });
-app.get('/api/check-generation/:id', async (req, res) => {
+app.get('/api/check-generation/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         console.log('CHECKING GENERATION ID:', id);
@@ -1837,11 +1974,67 @@ app.get('/api/check-generation/:id', async (req, res) => {
         });
     }
 });
-const PORT = process.env.PORT || 5002;
+app.get('/api/billing/catalog', (_req, res) => {
+    res.json({
+        plans: plans_1.PLAN_CATALOG,
+        tokenPacks: plans_1.TOKEN_PACKS,
+        tokensPerGeneration: plans_1.TOKENS_PER_GENERATION,
+        paymentsEnabled: (0, yookassaService_1.isYooKassaConfigured)(),
+    });
+});
+app.get('/api/billing/me', authenticateToken, asyncRoute(async (req, res) => {
+    const snap = await (0, planService_1.getBillingSnapshot)(req.user.id);
+    res.json(snap);
+}));
+app.post('/api/billing/create-payment', authenticateToken, asyncRoute(async (req, res) => {
+    const kind = req.body?.kind;
+    const allowed = ['PLAN_PRO', 'PLAN_PLATINUM', 'TOKENS_400'];
+    if (!allowed.includes(kind)) {
+        return res.status(400).json({ error: 'Invalid product kind' });
+    }
+    const frontend = process.env.FRONTEND_URL || 'https://soundlab-studio.ru';
+    const returnUrl = typeof req.body?.returnUrl === 'string' && req.body.returnUrl.startsWith(frontend)
+        ? req.body.returnUrl
+        : `${frontend}/pricing?payment=return`;
+    try {
+        const created = await (0, yookassaService_1.createYooKassaPayment)({
+            userId: req.user.id,
+            kind: kind,
+            returnUrl,
+        });
+        void (0, emailService_1.sendAdminNotification)('Новый платёж YooKassa', `User: ${req.user.username}\nKind: ${kind}\nAmount: ${created.amountRub} ₽\nPayment: ${created.paymentId}`);
+        res.status(201).json(created);
+    }
+    catch (e) {
+        res.status(e.status || 500).json({ error: e.message, details: e.details });
+    }
+}));
+app.get('/api/billing/payments/:id', authenticateToken, asyncRoute(async (req, res) => {
+    try {
+        const payment = await (0, yookassaService_1.syncPaymentStatus)(req.user.id, req.params.id);
+        const snap = await (0, planService_1.getBillingSnapshot)(req.user.id);
+        res.json({ payment, billing: snap });
+    }
+    catch (e) {
+        res.status(e.status || 500).json({ error: e.message });
+    }
+}));
+app.post('/api/billing/webhook', async (req, res) => {
+    try {
+        await (0, yookassaService_1.handleYooKassaWebhook)(req.body);
+        res.status(200).json({ ok: true });
+    }
+    catch (e) {
+        console.error('YooKassa webhook error:', e);
+        res.status(500).json({ error: 'Webhook failed' });
+    }
+});
+const PORT = Number(process.env.PORT || 5002);
+const HOST = process.env.HOST || '127.0.0.1';
 const httpServer = (0, http_1.createServer)(app);
 (0, socketServer_1.createSocketServer)(httpServer);
-httpServer.listen(PORT, () => {
-    console.log(`Server on http://localhost:${PORT}`);
-    console.log(`WebSocket ready on ws://localhost:${PORT}`);
+httpServer.listen(PORT, HOST, () => {
+    console.log(`Server on http://${HOST}:${PORT}`);
+    console.log(`WebSocket ready on ws://${HOST}:${PORT}`);
 });
 //# sourceMappingURL=index.js.map

@@ -12,6 +12,25 @@ enum Role {
   ADMIN
 }
 
+enum PlanTier {
+  FREE
+  PRO
+  PLATINUM
+}
+
+enum PaymentKind {
+  PLAN_PRO
+  PLAN_PLATINUM
+  TOKENS_400
+}
+
+enum PaymentStatus {
+  PENDING
+  WAITING_FOR_CAPTURE
+  SUCCEEDED
+  CANCELED
+}
+
 enum MessageStatus {
   SENT
   DELIVERED
@@ -63,6 +82,14 @@ model User {
   displayName String?
   avatar      String?
   bio         String?   @db.Text
+
+  // Subscription / tokens
+  plan              PlanTier  @default(FREE)
+  planExpiresAt     DateTime?
+  tokenBalance      Int       @default(0)
+  /// YYYY-MM-DD (UTC) bucket for Platinum daily cloud-save cap
+  midiSavesDayKey   String?
+  midiSavesToday    Int       @default(0)
   
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -87,6 +114,7 @@ model User {
   postViews   PostView[]
   notifications Notification[] @relation("NotificationRecipient")
   sentNotifications Notification[] @relation("NotificationActor")
+  payments   Payment[]
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
@@ -138,6 +166,25 @@ model PresetPurchase {
   @@unique([buyerId, presetId])
   @@index([presetId, status])
   @@map("preset_purchases")
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  userId            String
+  kind              PaymentKind
+  status            PaymentStatus @default(PENDING)
+  amountRub         Int
+  yookassaPaymentId String?       @unique
+  confirmationUrl   String?
+  description       String
+  metadata          Json?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("payments")
 }
 
 model MidiProject {

@@ -14,6 +14,19 @@ import { createFollowRouter } from './src/routes/followRoutes';
 import { createPresetRouter } from './src/routes/presetRoutes';
 import { createVerificationPayload, sendVerificationEmail, sendAdminNotification } from './src/services/emailService';
 import {
+  getBillingSnapshot,
+  assertCanCreateMidiProject,
+  recordMidiCloudSave,
+  consumeAiGenerationTokens,
+} from './src/services/planService';
+import {
+  createYooKassaPayment,
+  handleYooKassaWebhook,
+  syncPaymentStatus,
+  isYooKassaConfigured,
+} from './src/services/yookassaService';
+import { PLAN_CATALOG, TOKEN_PACKS, TOKENS_PER_GENERATION } from './src/config/plans';
+import {
   exchangeGoogleCode,
   exchangeVkCode,
   findOrCreateOAuthUser,
@@ -165,6 +178,9 @@ const userPublicSelect = {
   emailVerified: true,
   displayName: true,
   avatar: true,
+  plan: true,
+  planExpiresAt: true,
+  tokenBalance: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -671,6 +687,12 @@ app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) =>
     return res.status(400).json({ error: 'Project name and data are required' });
   }
 
+  try {
+    await assertCanCreateMidiProject(req.user!.id);
+  } catch (e: any) {
+    return res.status(e.status || 402).json({ error: e.message, code: e.code });
+  }
+
   const project = await prisma.midiProject.create({
     data: {
       name,
@@ -678,6 +700,7 @@ app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) =>
       ownerId: req.user!.id,
     },
   });
+  await recordMidiCloudSave(req.user!.id);
   res.status(201).json(project);
 }));
 
@@ -2372,7 +2395,7 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req: AuthenticatedR
   }
 });
 
-// Suno API endpoints
+// Suno API endpoints — auth + token quota
 const generateMusicSchema = z.object({
   title: z.string().trim().min(1).max(100),
   tags: z.string().trim().min(1).max(1000),
@@ -2381,7 +2404,7 @@ const generateMusicSchema = z.object({
   model: z.literal('v5.5').optional(),
 });
 
-app.post('/api/generate-music', async (req, res) => {
+app.post('/api/generate-music', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
     const parsedRequest = generateMusicSchema.safeParse(req.body);
     if (!parsedRequest.success) {
@@ -2391,6 +2414,13 @@ app.post('/api/generate-music', async (req, res) => {
       });
     }
     const { title, tags, prompt, translate_input, model } = parsedRequest.data;
+
+    let tokenBalanceLeft: number;
+    try {
+      tokenBalanceLeft = await consumeAiGenerationTokens(req.user!.id);
+    } catch (e: any) {
+      return res.status(e.status || 402).json({ error: e.message, code: e.code });
+    }
 
     const apiKey = process.env.SUNO_API_KEY;
     if (!apiKey) {
@@ -2417,18 +2447,23 @@ app.post('/api/generate-music', async (req, res) => {
 
     if (!response.ok) {
       const errorText = await response.text();
+      // refund tokens on provider failure
+      await prisma.user.update({
+        where: { id: req.user!.id },
+        data: { tokenBalance: { increment: TOKENS_PER_GENERATION } },
+      });
       throw new Error(`Suno API error: ${response.status} - ${errorText}`);
     }
 
-    const data = await response.json();
-    res.json(data);
+    const data = await response.json() as Record<string, unknown>;
+    res.json({ ...data, tokenBalance: tokenBalanceLeft, tokensCharged: TOKENS_PER_GENERATION });
   } catch (error) {
     console.error('Generation error:', error);
     res.status(500).json({ error: 'Failed to generate music' });
   }
 });
 
-app.get('/api/check-generation/:id', async (req, res) => {
+app.get('/api/check-generation/:id', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
     const { id } = req.params;
     
@@ -2471,6 +2506,71 @@ app.get('/api/check-generation/:id', async (req, res) => {
     res.status(500).json({ 
       error: error instanceof Error ? error.message : 'Failed to check generation' 
     });
+  }
+});
+
+// ── Billing / plans / YooKassa ─────────────────────────────────
+app.get('/api/billing/catalog', (_req, res) => {
+  res.json({
+    plans: PLAN_CATALOG,
+    tokenPacks: TOKEN_PACKS,
+    tokensPerGeneration: TOKENS_PER_GENERATION,
+    paymentsEnabled: isYooKassaConfigured(),
+  });
+});
+
+app.get('/api/billing/me', authenticateToken, asyncRoute(async (req, res) => {
+  const snap = await getBillingSnapshot(req.user!.id);
+  res.json(snap);
+}));
+
+app.post('/api/billing/create-payment', authenticateToken, asyncRoute(async (req, res) => {
+  const kind = req.body?.kind as string;
+  const allowed = ['PLAN_PRO', 'PLAN_PLATINUM', 'TOKENS_400'];
+  if (!allowed.includes(kind)) {
+    return res.status(400).json({ error: 'Invalid product kind' });
+  }
+
+  const frontend = process.env.FRONTEND_URL || 'https://soundlab-studio.ru';
+  const returnUrl =
+    typeof req.body?.returnUrl === 'string' && req.body.returnUrl.startsWith(frontend)
+      ? req.body.returnUrl
+      : `${frontend}/pricing?payment=return`;
+
+  try {
+    const created = await createYooKassaPayment({
+      userId: req.user!.id,
+      kind: kind as any,
+      returnUrl,
+    });
+    void sendAdminNotification(
+      'Новый платёж YooKassa',
+      `User: ${req.user!.username}\nKind: ${kind}\nAmount: ${created.amountRub} ₽\nPayment: ${created.paymentId}`,
+    );
+    res.status(201).json(created);
+  } catch (e: any) {
+    res.status(e.status || 500).json({ error: e.message, details: e.details });
+  }
+}));
+
+app.get('/api/billing/payments/:id', authenticateToken, asyncRoute(async (req, res) => {
+  try {
+    const payment = await syncPaymentStatus(req.user!.id, req.params.id);
+    const snap = await getBillingSnapshot(req.user!.id);
+    res.json({ payment, billing: snap });
+  } catch (e: any) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+}));
+
+/** YooKassa HTTP notifications */
+app.post('/api/billing/webhook', async (req, res) => {
+  try {
+    await handleYooKassaWebhook(req.body);
+    res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error('YooKassa webhook error:', e);
+    res.status(500).json({ error: 'Webhook failed' });
   }
 });
 

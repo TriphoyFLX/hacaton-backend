@@ -37,6 +37,11 @@ export declare function findOrCreateOAuthUser(input: {
     displayName: string | null;
     avatar: string | null;
     bio: string | null;
+    plan: import(".prisma/client").$Enums.PlanTier;
+    planExpiresAt: Date | null;
+    tokenBalance: number;
+    midiSavesDayKey: string | null;
+    midiSavesToday: number;
     createdAt: Date;
     updatedAt: Date;
 }>;

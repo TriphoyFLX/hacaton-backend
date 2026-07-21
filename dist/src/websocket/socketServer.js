@@ -14,6 +14,7 @@ const chatRepository_1 = require("../repositories/chatRepository");
 const profileService_1 = require("../services/profileService");
 const messageValidation_1 = require("../utils/messageValidation");
 const rateLimiter_1 = require("../utils/rateLimiter");
+const security_1 = require("../middleware/security");
 const userSockets = new Map();
 const activeChatUsers = new Map();
 let ioInstance = null;
@@ -21,9 +22,10 @@ function getIO() {
     return ioInstance;
 }
 function createSocketServer(httpServer) {
+    const JWT_SECRET = (0, security_1.requireJwtSecret)();
     const io = new socket_io_1.Server(httpServer, {
         cors: {
-            origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+            origin: (0, security_1.getAllowedOrigins)(),
             methods: ['GET', 'POST'],
             credentials: true,
         },
@@ -38,7 +40,7 @@ function createSocketServer(httpServer) {
             if (!token) {
                 return next(new Error('Authentication required'));
             }
-            const decoded = jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET || 'secret');
+            const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
             const user = await profileService_1.profileService.getProfile(decoded.userId);
             if (!user) {
                 return next(new Error('User not found'));
