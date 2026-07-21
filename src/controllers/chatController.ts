@@ -163,15 +163,15 @@ export async function createChat(req: AuthenticatedRequest, res: Response) {
       return res.status(400).json({ error: 'Cannot chat with yourself' });
     }
 
+    const isBlocked = await blockService.isEitherBlocked(req.user.id, receiverId);
+    if (isBlocked) {
+      return res.status(403).json({ error: 'Невозможно начать чат с этим пользователем' });
+    }
+
     const chat = await chatService.createOrGetChat(req.user.id, receiverId);
 
     if (!chat) {
       return res.status(404).json({ error: 'User not found' });
-    }
-
-    const isBlocked = await blockService.isEitherBlocked(req.user.id, receiverId);
-    if (isBlocked) {
-      return res.status(403).json({ error: 'Невозможно начать чат с этим пользователем' });
     }
 
     const otherUser = chat.users.find((u: { user: { id: string } }) => u.user.id !== req.user!.id)?.user;
