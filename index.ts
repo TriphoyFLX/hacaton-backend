@@ -73,15 +73,17 @@ const storage = multer.diskStorage({
   }
 });
 
+const SOUNDTOK_MAX_BYTES = 100 * 1024 * 1024; // 100MB — matches SoundTok UI
+
 const upload = multer({
   storage,
   limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit
+    fileSize: SOUNDTOK_MAX_BYTES,
   },
   fileFilter: (req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
     // Разрешаем изображения, видео и аудио файлы
     const allowedImageTypes = /jpeg|jpg|png|gif/;
-    const allowedVideoTypes = /mp4|mov|avi/;
+    const allowedVideoTypes = /mp4|mov|avi|webm/;
     const allowedAudioTypes = /mp3|wav|mpeg|audio\/mpeg|audio\/wav|audio\/mp3/;
     
     const extname = file.originalname.toLowerCase();
@@ -1058,7 +1060,16 @@ app.post('/api/posts/:id/view', async (req, res) => {
 });
 
 // Create SoundTok (short video)
-app.post('/api/soundtok', upload.single('video'), async (req, res) => {
+app.post('/api/soundtok', (req, res, next) => {
+  upload.single('video')(req, res, (error: unknown) => {
+    if (!error) return next();
+    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'Video must not exceed 100 MB' });
+    }
+    console.warn('SoundTok multer error:', error);
+    return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid video' });
+  });
+}, async (req, res) => {
   try {
     console.log('SoundTok upload - headers:', req.headers.authorization ? 'Auth header present' : 'No auth header');
     console.log('SoundTok upload - body:', req.body);
