@@ -7,6 +7,7 @@ import { AuthenticatedRequest } from '../types';
 import { validateMessageContent } from '../utils/messageValidation';
 import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
 import { getIO } from '../websocket/socketServer';
+import { notificationService } from '../services/notificationService';
 
 const MESSAGE_RATE_LIMIT = 30;
 const MESSAGE_RATE_WINDOW_MS = 60_000;
@@ -306,6 +307,15 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     }
 
     getIO()?.to(`chat:${chatId}`).emit('message:new', result.message);
+    if (result.message.receiverId) {
+      void notificationService.create({
+        userId: result.message.receiverId,
+        actorId: req.user.id,
+        type: 'MESSAGE',
+        entityType: 'chat',
+        entityId: chatId,
+      }).catch((error) => console.error('Failed to create message notification:', error));
+    }
 
     res.status(201).json(result.message);
   } catch (error) {

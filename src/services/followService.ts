@@ -15,13 +15,13 @@ export class FollowService {
     const already = await followRepository.isFollowing(followerId, followingId);
     if (already) {
       const followersCount = await followRepository.getFollowersCount(followingId);
-      return { success: true as const, following: true, followersCount };
+      return { success: true as const, following: true, followersCount, created: false };
     }
 
     await followRepository.follow(followerId, followingId);
     const followersCount = await followRepository.getFollowersCount(followingId);
 
-    return { success: true as const, following: true, followersCount };
+    return { success: true as const, following: true, followersCount, created: true };
   }
 
   async unfollow(followerId: string, followingId: string) {

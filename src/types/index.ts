@@ -19,12 +19,28 @@ export interface TokenPayload {
 // WebSocket event types
 export interface ServerToClientEvents {
   'message:new': (message: MessageWithSender) => void;
+  'notification:new': (notification: NotificationEvent) => void;
   'message:status': (data: { messageId: string; status: string; readAt?: Date }) => void;
   'message:delivered': (data: { clientMessageId: string; messageId: string }) => void;
   'chat:typing': (data: { chatId: string; userId: string; isTyping: boolean }) => void;
   'chat:presence': (data: { chatId: string; userId: string; isOnline: boolean }) => void;
   'user:online': (data: { userId: string; isOnline: boolean }) => void;
   'error': (error: { message: string; code: string }) => void;
+}
+
+export interface NotificationEvent {
+  id: string;
+  type: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE';
+  entityType: string | null;
+  entityId: string | null;
+  readAt: Date | null;
+  createdAt: Date;
+  actor: {
+    id: string;
+    username: string;
+    displayName?: string | null;
+    avatar?: string | null;
+  };
 }
 
 export interface ClientToServerEvents {

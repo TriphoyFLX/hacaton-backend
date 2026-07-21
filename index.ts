@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { z } from 'zod';
 import { createServer } from 'http';
 import { createProfileRouter } from './src/routes/profileRoutes';
 import { createFollowRouter } from './src/routes/followRoutes';
@@ -24,6 +25,7 @@ import {
 import { createChatRouter } from './src/routes/chatRoutes';
 import { createBlockRouter } from './src/routes/blockRoutes';
 import { createSocketServer, getUserOnlineStatus } from './src/websocket/socketServer';
+import { notificationService } from './src/services/notificationService';
 import { rateLimitMiddleware } from './src/utils/rateLimiter';
 import { corsOptions, requireJwtSecret, securityHeaders } from './src/middleware/security';
 import { validateMessageContent } from './src/utils/messageValidation';
@@ -765,6 +767,29 @@ app.use('/api/chats', createChatRouter(authenticateToken));
 app.use('/api/blocks', createBlockRouter(authenticateToken));
 app.use('/api/presets', createPresetRouter(prisma, authenticateToken, uploadsDir, privatePresetsDir));
 
+app.get('/api/notifications', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+    res.json(await notificationService.list(req.user!.id, limit));
+  } catch (error) {
+    console.error('Failed to fetch notifications:', error);
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+app.patch('/api/notifications/read', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) && req.body.ids.every((id: unknown) => typeof id === 'string')
+      ? req.body.ids as string[]
+      : undefined;
+    const unreadCount = await notificationService.markRead(req.user!.id, ids);
+    res.json({ unreadCount });
+  } catch (error) {
+    console.error('Failed to mark notifications as read:', error);
+    res.status(500).json({ error: 'Failed to update notifications' });
+  }
+});
+
 // Create post with media
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
   try {
@@ -807,7 +832,9 @@ app.post('/api/posts', upload.array('media', 10), async (req, res) => {
         author: {
           select: {
             id: true,
-            username: true
+            username: true,
+            displayName: true,
+            avatar: true,
           }
         }
       }
@@ -824,13 +851,24 @@ app.post('/api/posts', upload.array('media', 10), async (req, res) => {
 app.get('/api/posts', async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
+    const sort = req.query.sort === 'trending' ? 'trending' : 'latest';
+    const rawTag = typeof req.query.tag === 'string' ? req.query.tag : '';
+    const tag = rawTag.replace(/^#/, '').trim().slice(0, 64);
     const posts = await prisma.post.findMany({
+      where: tag ? {
+        content: {
+          contains: `#${tag}`,
+          mode: 'insensitive',
+        },
+      } : undefined,
       include: {
         media: true,
         author: {
           select: {
             id: true,
-            username: true
+            username: true,
+            displayName: true,
+            avatar: true,
           }
         },
         likesList: userId ? {
@@ -838,9 +876,9 @@ app.get('/api/posts', async (req, res) => {
           select: { id: true },
         } : false,
       },
-      orderBy: {
-        createdAt: 'desc'
-      }
+      orderBy: sort === 'trending'
+        ? [{ likes: 'desc' }, { commentsCount: 'desc' }, { createdAt: 'desc' }]
+        : { createdAt: 'desc' }
     });
 
     res.json(posts.map((post) => ({
@@ -861,7 +899,7 @@ app.get('/api/posts/:id', async (req, res) => {
       where: { id: req.params.id },
       include: {
         media: true,
-        author: { select: { id: true, username: true } },
+        author: { select: { id: true, username: true, displayName: true, avatar: true } },
         likesList: userId ? { where: { userId }, select: { id: true } } : false,
       },
     });
@@ -877,7 +915,7 @@ app.post('/api/posts/:id/like', async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true, authorId: true } });
     if (!post) return res.status(404).json({ error: 'Post not found' });
     const existing = await prisma.postLike.findUnique({ where: { userId_postId: { userId, postId: post.id } } });
     if (existing) return res.status(400).json({ error: 'Already liked' });
@@ -886,6 +924,13 @@ app.post('/api/posts/:id/like', async (req, res) => {
       prisma.post.update({ where: { id: post.id }, data: { likes: { increment: 1 } } }),
     ]);
     const updated = await prisma.post.findUnique({ where: { id: post.id }, select: { likes: true } });
+    void notificationService.create({
+      userId: post.authorId,
+      actorId: userId,
+      type: 'LIKE',
+      entityType: 'post',
+      entityId: post.id,
+    }).catch((error) => console.error('Failed to create like notification:', error));
     res.json({ id: post.id, likes: updated?.likes ?? 0, isLiked: true });
   } catch (error) {
     console.error(error);
@@ -897,7 +942,7 @@ app.delete('/api/posts/:id/like', async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true, authorId: true } });
     if (!post) return res.status(404).json({ error: 'Post not found' });
     const existing = await prisma.postLike.findUnique({ where: { userId_postId: { userId, postId: post.id } } });
     if (!existing) return res.status(400).json({ error: 'Post is not liked' });
@@ -935,7 +980,7 @@ app.post('/api/posts/:id/comments', async (req, res) => {
     const validation = validateMessageContent(req.body?.text);
     if (!validation.valid || !validation.content) return res.status(400).json({ error: validation.error || 'Invalid comment' });
     if (validation.content.length > 1000) return res.status(400).json({ error: 'Comment is too long' });
-    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true, authorId: true } });
     if (!post) return res.status(404).json({ error: 'Post not found' });
     const [comment, updated] = await prisma.$transaction([
       prisma.postComment.create({
@@ -944,6 +989,13 @@ app.post('/api/posts/:id/comments', async (req, res) => {
       }),
       prisma.post.update({ where: { id: post.id }, data: { commentsCount: { increment: 1 } }, select: { commentsCount: true } }),
     ]);
+    void notificationService.create({
+      userId: post.authorId,
+      actorId: userId,
+      type: 'COMMENT',
+      entityType: 'post',
+      entityId: post.id,
+    }).catch((error) => console.error('Failed to create comment notification:', error));
     res.status(201).json({ comment, commentsCount: updated.commentsCount });
   } catch (error) {
     console.error(error);
@@ -1117,6 +1169,13 @@ app.post('/api/soundtok/:id/like', async (req, res) => {
       }
     });
 
+    void notificationService.create({
+      userId: soundTok.authorId,
+      actorId: userId,
+      type: 'LIKE',
+      entityType: 'soundtok',
+      entityId: soundTok.id,
+    }).catch((error) => console.error('Failed to create SoundTok like notification:', error));
     res.json(soundTok);
   } catch (error) {
     console.error(error);
@@ -1238,9 +1297,16 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
           increment: 1
         }
       },
-      select: { commentsCount: true }
+      select: { id: true, authorId: true, commentsCount: true }
     });
 
+    void notificationService.create({
+      userId: updated.authorId,
+      actorId: userId,
+      type: 'COMMENT',
+      entityType: 'soundtok',
+      entityId: updated.id,
+    }).catch((error) => console.error('Failed to create SoundTok comment notification:', error));
     res.status(201).json({ comment, commentsCount: updated.commentsCount });
   } catch (error) {
     console.error(error);
@@ -2307,13 +2373,24 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req: AuthenticatedR
 });
 
 // Suno API endpoints
+const generateMusicSchema = z.object({
+  title: z.string().trim().min(1).max(100),
+  tags: z.string().trim().min(1).max(1000),
+  prompt: z.string().trim().max(5000).optional(),
+  translate_input: z.boolean().optional(),
+  model: z.literal('v5.5').optional(),
+});
+
 app.post('/api/generate-music', async (req, res) => {
   try {
-    const { title, tags, prompt, translate_input, model } = req.body;
-    
-    if (!title || !tags) {
-      return res.status(400).json({ error: 'Title and tags are required' });
+    const parsedRequest = generateMusicSchema.safeParse(req.body);
+    if (!parsedRequest.success) {
+      return res.status(400).json({
+        error: 'Invalid generation parameters',
+        details: parsedRequest.error.issues.map(issue => issue.message),
+      });
     }
+    const { title, tags, prompt, translate_input, model } = parsedRequest.data;
 
     const apiKey = process.env.SUNO_API_KEY;
     if (!apiKey) {
@@ -2324,7 +2401,7 @@ app.post('/api/generate-music', async (req, res) => {
       title,
       tags,
       ...(prompt && { prompt }),
-      translate_input: translate_input || true,
+      translate_input: translate_input ?? true,
       model: model || 'v5.5'
     };
 
@@ -2347,9 +2424,7 @@ app.post('/api/generate-music', async (req, res) => {
     res.json(data);
   } catch (error) {
     console.error('Generation error:', error);
-    res.status(500).json({ 
-      error: error instanceof Error ? error.message : 'Failed to generate music' 
-    });
+    res.status(500).json({ error: 'Failed to generate music' });
   }
 });
 

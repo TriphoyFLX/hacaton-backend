@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { followService } from '../services/followService';
 import { userRepository } from '../repositories/userRepository';
 import { AuthenticatedRequest } from '../types';
+import { notificationService } from '../services/notificationService';
 
 export function createFollowHandlers() {
   async function followUser(req: AuthenticatedRequest, res: Response) {
@@ -17,6 +18,15 @@ export function createFollowHandlers() {
         return res.status(400).json({ error: result.error });
       }
 
+      if (result.created) {
+        void notificationService.create({
+          userId,
+          actorId: req.user.id,
+          type: 'FOLLOW',
+          entityType: 'user',
+          entityId: req.user.id,
+        }).catch((error) => console.error('Failed to create follow notification:', error));
+      }
       res.json(result);
     } catch (error) {
       console.error('followUser error:', error);

@@ -8,6 +8,7 @@ import { profileService } from '../services/profileService';
 import { validateMessageContent } from '../utils/messageValidation';
 import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
 import { getAllowedOrigins, requireJwtSecret } from '../middleware/security';
+import { notificationService } from '../services/notificationService';
 import {
   ServerToClientEvents,
   ClientToServerEvents,
@@ -100,6 +101,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
       userSockets.set(userId, new Set());
     }
     userSockets.get(userId)!.add(socket.id);
+    socket.join(`user:${userId}`);
 
     // Notify subscribers about online status
     io.to(`user:${userId}`).emit('user:online', { userId, isOnline: true });
@@ -264,6 +266,15 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
 
         // Broadcast to all users in chat
         io.to(`chat:${data.chatId}`).emit('message:new', message);
+        if (message.receiverId) {
+          void notificationService.create({
+            userId: message.receiverId,
+            actorId: userId,
+            type: 'MESSAGE',
+            entityType: 'chat',
+            entityId: data.chatId,
+          }).catch((error) => console.error('Failed to create message notification:', error));
+        }
 
         // Check if receiver is in chat for immediate delivery status
         const chatUsers = activeChatUsers.get(data.chatId);
