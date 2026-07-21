@@ -6,6 +6,8 @@ import {
   createGroup,
   pinChat,
   sendMessage,
+  deleteMessage,
+  toggleMessageReaction,
   markAsRead,
   getAvailableUsers,
   getUnreadTotal,
@@ -29,6 +31,8 @@ export function createChatRouter(authenticateToken: AuthMiddleware): Router {
   router.post('/', authenticateToken, createChat);
   router.patch('/:chatId/pin', authenticateToken, pinChat);
   router.post('/:chatId/messages', authenticateToken, sendMessage);
+  router.delete('/:chatId/messages/:messageId', authenticateToken, deleteMessage);
+  router.post('/:chatId/messages/:messageId/reactions', authenticateToken, toggleMessageReaction);
   router.post('/:chatId/read', authenticateToken, markAsRead);
 
   return router;

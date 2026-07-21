@@ -18,6 +18,7 @@ const chatUserInclude = {
 const chatListInclude = {
   users: chatUserInclude,
         messages: {
+          where: { deletedAt: null },
           orderBy: { createdAt: 'desc' as const },
           take: 1,
           include: {

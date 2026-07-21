@@ -232,6 +232,29 @@ export class ChatService {
     return messages.map((m) => m.id);
   }
 
+  async deleteMessage(chatId: string, messageId: string, userId: string) {
+    const isMember = await chatRepository.isChatMember(chatId, userId);
+    if (!isMember) return { success: false as const, error: 'Access denied' };
+
+    const message = await messageRepository.softDeleteMessage(messageId, userId, chatId);
+    if (!message) return { success: false as const, error: 'Message not found' };
+    return { success: true as const, message };
+  }
+
+  async toggleReaction(chatId: string, messageId: string, userId: string, emoji: string) {
+    const isMember = await chatRepository.isChatMember(chatId, userId);
+    if (!isMember) return { success: false as const, error: 'Access denied' };
+
+    const result = await messageRepository.toggleReaction({
+      messageId,
+      chatId,
+      userId,
+      emoji,
+    });
+    if (!result) return { success: false as const, error: 'Invalid reaction' };
+    return { success: true as const, ...result };
+  }
+
   async getUnreadCounts(userId: string, chatIds: string[]): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
     await Promise.all(

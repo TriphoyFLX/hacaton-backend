@@ -115,6 +115,7 @@ model User {
   notifications Notification[] @relation("NotificationRecipient")
   sentNotifications Notification[] @relation("NotificationActor")
   payments   Payment[]
+  messageReactions MessageReaction[]
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
@@ -364,6 +365,7 @@ model Message {
   clientMessageId String?   // ID generated on client to prevent duplicates
   status      MessageStatus @default(SENT)
   readAt      DateTime?
+  deletedAt   DateTime?
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -372,12 +374,28 @@ model Message {
   receiver  User?    @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
   chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
   soundTok  SoundTok? @relation(fields: [soundTokId], references: [id], onDelete: SetNull)
+  reactions MessageReaction[]
 
   @@unique([clientMessageId, chatId]) // Prevent duplicate messages from same client
   @@index([chatId, createdAt])         // Optimize message history queries
   @@index([senderId, status])          // Optimize status update queries
   @@index([soundTokId])
   @@map("messages")
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@map("message_reactions")
 }
 
 model ChatUser {

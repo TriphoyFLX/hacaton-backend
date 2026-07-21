@@ -19,6 +19,8 @@ export interface TokenPayload {
 // WebSocket event types
 export interface ServerToClientEvents {
   'message:new': (message: MessageWithSender) => void;
+  'message:deleted': (data: { chatId: string; message: MessageWithSender }) => void;
+  'message:reaction': (data: { chatId: string; message: MessageWithSender }) => void;
   'notification:new': (notification: NotificationEvent) => void;
   'message:status': (data: { messageId: string; status: string; readAt?: Date }) => void;
   'message:delivered': (data: { clientMessageId: string; messageId: string }) => void;
@@ -76,6 +78,17 @@ export interface SharedSoundTokPreview {
   };
 }
 
+export interface MessageReactionSummary {
+  id: string;
+  emoji: string;
+  userId: string;
+  createdAt: Date;
+  user?: {
+    id: string;
+    username: string;
+  };
+}
+
 export interface MessageWithSender {
   id: string;
   content: string;
@@ -86,6 +99,7 @@ export interface MessageWithSender {
   clientMessageId?: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ';
   readAt?: Date | null;
+  deletedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
   sender: {
@@ -95,6 +109,7 @@ export interface MessageWithSender {
     avatar?: string | null;
   };
   soundTok?: SharedSoundTokPreview | null;
+  reactions?: MessageReactionSummary[];
 }
 
 export interface SendMessageData {

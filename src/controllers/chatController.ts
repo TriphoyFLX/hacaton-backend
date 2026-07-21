@@ -324,6 +324,41 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
   }
 }
 
+export async function deleteMessage(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId, messageId } = req.params;
+    const result = await chatService.deleteMessage(chatId, messageId, req.user.id);
+    if (!result.success || !result.message) {
+      return res.status(result.error === 'Access denied' ? 403 : 404).json({ error: result.error || 'Failed to delete message' });
+    }
+    getIO()?.to(`chat:${chatId}`).emit('message:deleted', { chatId, message: result.message });
+    res.json(result.message);
+  } catch (error) {
+    console.error('deleteMessage error:', error);
+    res.status(500).json({ error: 'Failed to delete message' });
+  }
+}
+
+export async function toggleMessageReaction(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId, messageId } = req.params;
+    const emoji = typeof req.body?.emoji === 'string' ? req.body.emoji.trim() : '';
+    if (!emoji) return res.status(400).json({ error: 'Emoji is required' });
+
+    const result = await chatService.toggleReaction(chatId, messageId, req.user.id, emoji);
+    if (!result.success || !result.message) {
+      return res.status(result.error === 'Access denied' ? 403 : 400).json({ error: result.error || 'Failed to react' });
+    }
+    getIO()?.to(`chat:${chatId}`).emit('message:reaction', { chatId, message: result.message });
+    res.json({ message: result.message, added: result.added });
+  } catch (error) {
+    console.error('toggleMessageReaction error:', error);
+    res.status(500).json({ error: 'Failed to update reaction' });
+  }
+}
+
 /**
  * Mark messages as read
  */

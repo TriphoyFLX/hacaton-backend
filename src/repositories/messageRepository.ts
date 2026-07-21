@@ -3,6 +3,8 @@ import { MessageWithSender } from '../types';
 
 const prisma = new PrismaClient();
 
+const ALLOWED_REACTION_EMOJIS = ['❤️', '👍', '😂', '🔥', '😮', '😢'] as const;
+
 const messageInclude = {
   sender: {
     select: {
@@ -28,7 +30,32 @@ const messageInclude = {
       },
     },
   },
+  reactions: {
+    select: {
+      id: true,
+      emoji: true,
+      userId: true,
+      createdAt: true,
+      user: {
+        select: {
+          id: true,
+          username: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'asc' as const },
+  },
 } as const;
+
+function sanitizeMessage(message: MessageWithSender): MessageWithSender {
+  if (!message.deletedAt) return message;
+  return {
+    ...message,
+    content: '',
+    soundTokId: null,
+    soundTok: null,
+  };
+}
 
 export class MessageRepository {
   /**
@@ -53,11 +80,11 @@ export class MessageRepository {
       });
 
       if (existing) {
-        return existing as MessageWithSender;
+        return sanitizeMessage(existing as MessageWithSender);
       }
     }
 
-    return prisma.message.create({
+    const created = await prisma.message.create({
       data: {
         content: data.content,
         senderId: data.senderId,
@@ -68,7 +95,8 @@ export class MessageRepository {
         status: MessageStatus.SENT,
       },
       include: messageInclude,
-    }) as Promise<MessageWithSender>;
+    });
+    return sanitizeMessage(created as MessageWithSender);
   }
 
   /**
@@ -90,14 +118,78 @@ export class MessageRepository {
       where.createdAt = { lt: before };
     }
 
-    return prisma.message.findMany({
+    return (await prisma.message.findMany({
       where,
       take: limit,
       skip: cursor ? 1 : 0,
       cursor: cursor ? { id: cursor } : undefined,
       orderBy: { createdAt: 'asc' },
       include: messageInclude,
-    }) as Promise<MessageWithSender[]>;
+    })).map((message) => sanitizeMessage(message as MessageWithSender));
+  }
+
+  async softDeleteMessage(messageId: string, senderId: string, chatId: string): Promise<MessageWithSender | null> {
+    const existing = await prisma.message.findFirst({
+      where: { id: messageId, chatId, senderId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!existing) return null;
+
+    const updated = await prisma.message.update({
+      where: { id: messageId },
+      data: { deletedAt: new Date(), content: '', soundTokId: null },
+      include: messageInclude,
+    });
+    return sanitizeMessage(updated as MessageWithSender);
+  }
+
+  async toggleReaction(input: {
+    messageId: string;
+    chatId: string;
+    userId: string;
+    emoji: string;
+  }): Promise<{ message: MessageWithSender; added: boolean } | null> {
+    if (!ALLOWED_REACTION_EMOJIS.includes(input.emoji as typeof ALLOWED_REACTION_EMOJIS[number])) {
+      return null;
+    }
+
+    const message = await prisma.message.findFirst({
+      where: { id: input.messageId, chatId: input.chatId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!message) return null;
+
+    const existing = await prisma.messageReaction.findUnique({
+      where: {
+        messageId_userId_emoji: {
+          messageId: input.messageId,
+          userId: input.userId,
+          emoji: input.emoji,
+        },
+      },
+    });
+
+    if (existing) {
+      await prisma.messageReaction.delete({ where: { id: existing.id } });
+    } else {
+      await prisma.messageReaction.create({
+        data: {
+          messageId: input.messageId,
+          userId: input.userId,
+          emoji: input.emoji,
+        },
+      });
+    }
+
+    const updated = await prisma.message.findUnique({
+      where: { id: input.messageId },
+      include: messageInclude,
+    });
+    if (!updated) return null;
+    return {
+      message: sanitizeMessage(updated as MessageWithSender),
+      added: !existing,
+    };
   }
 
   /**
@@ -200,6 +292,7 @@ export class MessageRepository {
         where: {
           chatId,
           senderId: { not: userId },
+          deletedAt: null,
           createdAt: { gt: chatUser?.lastReadAt ?? new Date(0) },
         },
       });
@@ -209,6 +302,7 @@ export class MessageRepository {
       where: {
         chatId,
         receiverId: userId,
+        deletedAt: null,
         status: { in: [MessageStatus.SENT, MessageStatus.DELIVERED] },
       },
     });
@@ -221,6 +315,7 @@ export class MessageRepository {
     const messages = await prisma.message.findMany({
       where: {
         chatId: { in: chatIds },
+        deletedAt: null,
       },
       orderBy: { createdAt: 'desc' },
       distinct: ['chatId'],
@@ -229,7 +324,7 @@ export class MessageRepository {
 
     const result = new Map<string, MessageWithSender>();
     for (const msg of messages) {
-      result.set(msg.chatId, msg as MessageWithSender);
+      result.set(msg.chatId, sanitizeMessage(msg as MessageWithSender));
     }
 
     return result;
@@ -237,3 +332,4 @@ export class MessageRepository {
 }
 
 export const messageRepository = new MessageRepository();
+export { ALLOWED_REACTION_EMOJIS };
