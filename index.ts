@@ -1028,6 +1028,55 @@ app.post('/api/posts/:id/comments', async (req, res) => {
   }
 });
 
+app.delete('/api/posts/:id', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const post = await prisma.post.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, authorId: true },
+    });
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    if (post.authorId !== userId) return res.status(403).json({ error: 'Access denied' });
+    await prisma.post.delete({ where: { id: post.id } });
+    res.json({ success: true, id: post.id });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to delete post' });
+  }
+});
+
+app.delete('/api/posts/:postId/comments/:commentId', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const comment = await prisma.postComment.findFirst({
+      where: { id: req.params.commentId, postId: req.params.postId },
+      select: { id: true, authorId: true, postId: true },
+    });
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    if (comment.authorId !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const [, updated] = await prisma.$transaction([
+      prisma.postComment.delete({ where: { id: comment.id } }),
+      prisma.post.update({
+        where: { id: comment.postId },
+        data: { commentsCount: { decrement: 1 } },
+        select: { commentsCount: true },
+      }),
+    ]);
+
+    res.json({
+      success: true,
+      id: comment.id,
+      commentsCount: Math.max(0, updated.commentsCount),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to delete comment' });
+  }
+});
+
 app.post('/api/posts/:id/view', async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
@@ -2537,7 +2586,7 @@ app.get('/api/billing/me', authenticateToken, asyncRoute(async (req, res) => {
 
 app.post('/api/billing/create-payment', authenticateToken, asyncRoute(async (req, res) => {
   const kind = req.body?.kind as string;
-  const allowed = ['PLAN_PRO', 'PLAN_PLATINUM', 'TOKENS_400'];
+  const allowed = ['PLAN_PRO', 'PLAN_PLATINUM', 'TOKENS_400', 'TOKENS_800', 'TOKENS_1200', 'TOKENS_2400'];
   if (!allowed.includes(kind)) {
     return res.status(400).json({ error: 'Invalid product kind' });
   }

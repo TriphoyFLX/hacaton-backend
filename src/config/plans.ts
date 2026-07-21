@@ -47,9 +47,38 @@ export const TOKEN_PACKS = {
     generations: 4,
     description: '400 токенов ≈ 4 AI-генерации. Можно купить в любой момент.',
   },
+  TOKENS_800: {
+    id: 'TOKENS_800' as const,
+    name: 'Пакет 800 токенов',
+    tokens: 800,
+    priceRub: 379,
+    generations: 8,
+    description: '800 токенов ≈ 8 AI-генераций.',
+  },
+  TOKENS_1200: {
+    id: 'TOKENS_1200' as const,
+    name: 'Пакет 1200 токенов',
+    tokens: 1200,
+    priceRub: 529,
+    generations: 12,
+    description: '1200 токенов ≈ 12 AI-генераций.',
+  },
+  TOKENS_2400: {
+    id: 'TOKENS_2400' as const,
+    name: 'Пакет 2400 токенов',
+    tokens: 2400,
+    priceRub: 949,
+    generations: 24,
+    description: '2400 токенов ≈ 24 AI-генерации.',
+  },
 } as const;
 
-export type PaymentProductKind = 'PLAN_PRO' | 'PLAN_PLATINUM' | 'TOKENS_400';
+export type TokenPackId = keyof typeof TOKEN_PACKS;
+export type PaymentProductKind = 'PLAN_PRO' | 'PLAN_PLATINUM' | TokenPackId;
+
+export function isTokenPackKind(kind: string): kind is TokenPackId {
+  return kind in TOKEN_PACKS;
+}
 
 export function productForKind(kind: PaymentProductKind) {
   if (kind === 'PLAN_PRO') {
@@ -58,5 +87,6 @@ export function productForKind(kind: PaymentProductKind) {
   if (kind === 'PLAN_PLATINUM') {
     return { kind, amountRub: PLAN_CATALOG.PLATINUM.priceRub, description: `Подписка SoundLab Platinum — ${PLAN_CATALOG.PLATINUM.priceRub} ₽ / 30 дней` };
   }
-  return { kind, amountRub: TOKEN_PACKS.TOKENS_400.priceRub, description: `Пакет токенов SoundLab — ${TOKEN_PACKS.TOKENS_400.tokens} шт.` };
+  const pack = TOKEN_PACKS[kind];
+  return { kind, amountRub: pack.priceRub, description: `Пакет токенов SoundLab — ${pack.tokens} шт.` };
 }

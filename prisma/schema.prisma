@@ -22,6 +22,9 @@ enum PaymentKind {
   PLAN_PRO
   PLAN_PLATINUM
   TOKENS_400
+  TOKENS_800
+  TOKENS_1200
+  TOKENS_2400
 }
 
 enum PaymentStatus {

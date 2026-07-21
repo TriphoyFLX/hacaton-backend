@@ -3,6 +3,7 @@ import {
   PLAN_CATALOG,
   TOKEN_PACKS,
   TOKENS_PER_GENERATION,
+  isTokenPackKind,
   type PlanId,
 } from '../config/plans';
 
@@ -183,10 +184,10 @@ export async function fulfillPayment(paymentId: string): Promise<void> {
       data: { status: 'SUCCEEDED' },
     });
 
-    if (locked.kind === 'TOKENS_400') {
+    if (isTokenPackKind(locked.kind)) {
       await tx.user.update({
         where: { id: locked.userId },
-        data: { tokenBalance: { increment: TOKEN_PACKS.TOKENS_400.tokens } },
+        data: { tokenBalance: { increment: TOKEN_PACKS[locked.kind].tokens } },
       });
       return;
     }
