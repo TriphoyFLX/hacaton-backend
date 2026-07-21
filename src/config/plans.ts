@@ -4,6 +4,13 @@ export type PlanId = 'FREE' | 'PRO' | 'PLATINUM';
 
 export const TOKENS_PER_GENERATION = 100;
 
+/**
+ * Internal cost reference (do not expose to clients):
+ * ~17 ₽ per AI generation → ~0.17 ₽/token.
+ * Pack prices stay ≥ ~2× cost with volume discounts vs the 400-token base rate.
+ */
+export const GENERATION_COST_RUB = 17;
+
 export const PLAN_CATALOG = {
   FREE: {
     id: 'FREE' as const,
@@ -45,36 +52,60 @@ export const TOKEN_PACKS = {
     tokens: 400,
     priceRub: 199,
     generations: 4,
-    description: '400 токенов ≈ 4 AI-генерации. Можно купить в любой момент.',
+    description: 'Старт: 4 генерации. Базовая цена за токен.',
+    badge: null as string | null,
   },
   TOKENS_800: {
     id: 'TOKENS_800' as const,
     name: 'Пакет 800 токенов',
     tokens: 800,
-    priceRub: 379,
+    priceRub: 359,
     generations: 8,
-    description: '800 токенов ≈ 8 AI-генераций.',
+    description: 'Выгоднее старта: −10% к цене за генерацию.',
+    badge: '−10%',
   },
   TOKENS_1200: {
     id: 'TOKENS_1200' as const,
     name: 'Пакет 1200 токенов',
     tokens: 1200,
-    priceRub: 529,
+    priceRub: 499,
     generations: 12,
-    description: '1200 токенов ≈ 12 AI-генераций.',
+    description: 'Популярный объём: −16% к цене за генерацию.',
+    badge: '−16%',
   },
   TOKENS_2400: {
     id: 'TOKENS_2400' as const,
     name: 'Пакет 2400 токенов',
     tokens: 2400,
-    priceRub: 949,
+    priceRub: 899,
     generations: 24,
-    description: '2400 токенов ≈ 24 AI-генерации.',
+    description: 'Максимум выгоды: −25% к цене за генерацию.',
+    badge: '−25%',
   },
 } as const;
 
 export type TokenPackId = keyof typeof TOKEN_PACKS;
 export type PaymentProductKind = 'PLAN_PRO' | 'PLAN_PLATINUM' | TokenPackId;
+
+/** Rub per generation at the smallest pack (base retail rate). */
+export function baseGenerationPriceRub(): number {
+  const base = TOKEN_PACKS.TOKENS_400;
+  return base.priceRub / base.generations;
+}
+
+export function packCompareAtRub(pack: (typeof TOKEN_PACKS)[TokenPackId]): number {
+  return Math.round(baseGenerationPriceRub() * pack.generations);
+}
+
+export function packSaveRub(pack: (typeof TOKEN_PACKS)[TokenPackId]): number {
+  return Math.max(0, packCompareAtRub(pack) - pack.priceRub);
+}
+
+export function packSavePercent(pack: (typeof TOKEN_PACKS)[TokenPackId]): number {
+  const compare = packCompareAtRub(pack);
+  if (compare <= 0) return 0;
+  return Math.round((packSaveRub(pack) / compare) * 100);
+}
 
 export function isTokenPackKind(kind: string): kind is TokenPackId {
   return kind in TOKEN_PACKS;
