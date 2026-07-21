@@ -26,6 +26,7 @@ import { createBlockRouter } from './src/routes/blockRoutes';
 import { createSocketServer, getUserOnlineStatus } from './src/websocket/socketServer';
 import { rateLimitMiddleware } from './src/utils/rateLimiter';
 import { corsOptions, requireJwtSecret, securityHeaders } from './src/middleware/security';
+import { validateMessageContent } from './src/utils/messageValidation';
 
 dotenv.config();
 const JWT_SECRET = requireJwtSecret();
@@ -822,6 +823,7 @@ app.post('/api/posts', upload.array('media', 10), async (req, res) => {
 // Get all posts
 app.get('/api/posts', async (req, res) => {
   try {
+    const userId = getUserFromToken(req.headers.authorization);
     const posts = await prisma.post.findMany({
       include: {
         media: true,
@@ -830,17 +832,153 @@ app.get('/api/posts', async (req, res) => {
             id: true,
             username: true
           }
-        }
+        },
+        likesList: userId ? {
+          where: { userId },
+          select: { id: true },
+        } : false,
       },
       orderBy: {
         createdAt: 'desc'
       }
     });
 
-    res.json(posts);
+    res.json(posts.map((post) => ({
+      ...post,
+      isLiked: userId ? post.likesList.length > 0 : false,
+      likesList: undefined,
+    })));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch posts' });
+  }
+});
+
+app.get('/api/posts/:id', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    const post = await prisma.post.findUnique({
+      where: { id: req.params.id },
+      include: {
+        media: true,
+        author: { select: { id: true, username: true } },
+        likesList: userId ? { where: { userId }, select: { id: true } } : false,
+      },
+    });
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    res.json({ ...post, isLiked: userId ? post.likesList.length > 0 : false, likesList: undefined });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch post' });
+  }
+});
+
+app.post('/api/posts/:id/like', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    const existing = await prisma.postLike.findUnique({ where: { userId_postId: { userId, postId: post.id } } });
+    if (existing) return res.status(400).json({ error: 'Already liked' });
+    await prisma.$transaction([
+      prisma.postLike.create({ data: { userId, postId: post.id } }),
+      prisma.post.update({ where: { id: post.id }, data: { likes: { increment: 1 } } }),
+    ]);
+    const updated = await prisma.post.findUnique({ where: { id: post.id }, select: { likes: true } });
+    res.json({ id: post.id, likes: updated?.likes ?? 0, isLiked: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to like post' });
+  }
+});
+
+app.delete('/api/posts/:id/like', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    const existing = await prisma.postLike.findUnique({ where: { userId_postId: { userId, postId: post.id } } });
+    if (!existing) return res.status(400).json({ error: 'Post is not liked' });
+    await prisma.$transaction([
+      prisma.postLike.delete({ where: { id: existing.id } }),
+      prisma.post.update({ where: { id: post.id }, data: { likes: { decrement: 1 } } }),
+    ]);
+    const updated = await prisma.post.findUnique({ where: { id: post.id }, select: { likes: true } });
+    res.json({ id: post.id, likes: Math.max(0, updated?.likes ?? 0), isLiked: false });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to unlike post' });
+  }
+});
+
+app.get('/api/posts/:id/comments', async (req, res) => {
+  try {
+    const comments = await prisma.postComment.findMany({
+      where: { postId: req.params.id },
+      include: { author: { select: { id: true, username: true, displayName: true, avatar: true } } },
+      orderBy: { createdAt: 'asc' },
+      take: 100,
+    });
+    res.json(comments);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch comments' });
+  }
+});
+
+app.post('/api/posts/:id/comments', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const validation = validateMessageContent(req.body?.text);
+    if (!validation.valid || !validation.content) return res.status(400).json({ error: validation.error || 'Invalid comment' });
+    if (validation.content.length > 1000) return res.status(400).json({ error: 'Comment is too long' });
+    const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    const [comment, updated] = await prisma.$transaction([
+      prisma.postComment.create({
+        data: { text: validation.content, authorId: userId, postId: post.id },
+        include: { author: { select: { id: true, username: true, displayName: true, avatar: true } } },
+      }),
+      prisma.post.update({ where: { id: post.id }, data: { commentsCount: { increment: 1 } }, select: { commentsCount: true } }),
+    ]);
+    res.status(201).json({ comment, commentsCount: updated.commentsCount });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to create comment' });
+  }
+});
+
+app.post('/api/posts/:id/view', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const post = await prisma.post.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, authorId: true, views: true },
+    });
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    if (post.authorId === userId) return res.json({ id: post.id, views: post.views });
+    const existing = await prisma.postView.findUnique({
+      where: { userId_postId: { userId, postId: post.id } },
+      select: { id: true },
+    });
+    if (existing) return res.json({ id: post.id, views: post.views });
+    try {
+      const [, updated] = await prisma.$transaction([
+        prisma.postView.create({ data: { userId, postId: post.id } }),
+        prisma.post.update({ where: { id: post.id }, data: { views: { increment: 1 } }, select: { views: true } }),
+      ]);
+      return res.json({ id: post.id, views: updated.views });
+    } catch {
+      const current = await prisma.post.findUnique({ where: { id: post.id }, select: { views: true } });
+      return res.json({ id: post.id, views: current?.views ?? post.views });
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to record post view' });
   }
 });
 

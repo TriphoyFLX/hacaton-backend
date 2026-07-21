@@ -75,6 +75,9 @@ model User {
   midiSamples MidiSample[]
   presets     Preset[]         @relation("PresetSeller")
   presetPurchases PresetPurchase[] @relation("PresetBuyer")
+  postLikes   PostLike[]
+  postComments PostComment[]
+  postViews   PostView[]
 
   followers Follow[] @relation("UserFollowers")
   following Follow[] @relation("UserFollowing")
@@ -162,16 +165,65 @@ model MidiSample {
 }
 
 model Post {
+  id            String        @id @default(cuid())
+  content       String
+  authorId      String
+  likes         Int           @default(0)
+  commentsCount Int           @default(0)
+  views         Int           @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  author        User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  media         Media[]
+  likesList     PostLike[]
+  comments      PostComment[]
+  viewers       PostView[]
+
+  @@map("posts")
+}
+
+model PostLike {
   id        String   @id @default(cuid())
-  content   String
+  userId    String
+  postId    String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([postId])
+  @@map("post_likes")
+}
+
+model PostComment {
+  id        String   @id @default(cuid())
+  text      String   @db.Text
   authorId  String
+  postId    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  media     Media[]
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
 
-  @@map("posts")
+  @@index([postId, createdAt])
+  @@map("post_comments")
+}
+
+model PostView {
+  id        String   @id @default(cuid())
+  userId    String
+  postId    String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([postId])
+  @@map("post_views")
 }
 
 model Media {

@@ -164,6 +164,19 @@ export class ChatRepository {
     return !!chatUser;
   }
 
+  async usersShareChat(userId: string, otherUserId: string): Promise<boolean> {
+    const chat = await prisma.chat.findFirst({
+      where: {
+        AND: [
+          { users: { some: { userId } } },
+          { users: { some: { userId: otherUserId } } },
+        ],
+      },
+      select: { id: true },
+    });
+    return !!chat;
+  }
+
   /**
    * Find all DIRECT chats that are exactly between these two users.
    */

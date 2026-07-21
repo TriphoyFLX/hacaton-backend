@@ -3,6 +3,7 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { chatService } from '../services/chatService';
 import { chatRepository } from '../repositories/chatRepository';
+import { messageRepository } from '../repositories/messageRepository';
 import { profileService } from '../services/profileService';
 import { validateMessageContent } from '../utils/messageValidation';
 import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
@@ -29,6 +30,11 @@ type AuthenticatedSocket = Socket<
 const userSockets = new Map<string, Set<string>>();
 // Map of chatId -> Set of user IDs currently in chat
 const activeChatUsers = new Map<string, Set<string>>();
+const MAX_MESSAGE_IDS_PER_READ = 100;
+
+function isSafeIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128;
+}
 
 let ioInstance: SocketIOServer | null = null;
 
@@ -58,9 +64,9 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
   // Authentication middleware
   io.use(async (socket: AuthenticatedSocket, next) => {
     try {
-      const token = socket.handshake.auth.token || socket.handshake.query.token;
+      const token = socket.handshake.auth.token;
 
-      if (!token) {
+      if (typeof token !== 'string' || !token) {
         return next(new Error('Authentication required'));
       }
 
@@ -115,6 +121,10 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Join chat room
     socket.on('chat:join', async (chatId: string) => {
       try {
+        if (!isSafeIdentifier(chatId)) {
+          socket.emit('error', { message: 'Invalid chat ID', code: 'INVALID_CHAT' });
+          return;
+        }
         const isMember = await chatRepository.isChatMember(chatId, userId);
         if (!isMember) {
           socket.emit('error', { message: 'Not a member of this chat', code: 'NOT_MEMBER' });
@@ -164,7 +174,10 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     });
 
     // Leave chat room
-    socket.on('chat:leave', (chatId: string) => {
+    socket.on('chat:leave', async (chatId: string) => {
+      if (!isSafeIdentifier(chatId) || !socket.rooms.has(`chat:${chatId}`)) return;
+      const isMember = await chatRepository.isChatMember(chatId, userId);
+      if (!isMember) return;
       socket.leave(`chat:${chatId}`);
       
       const chatUsers = activeChatUsers.get(chatId);
@@ -187,6 +200,10 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Send message
     socket.on('message:send', async (data, callback) => {
       try {
+        if (!isSafeIdentifier(data.chatId) || !isSafeIdentifier(data.clientMessageId)) {
+          callback({ success: false, error: 'Invalid message metadata', clientMessageId: data.clientMessageId });
+          return;
+        }
         const validation = validateMessageContent(data.content, {
           allowEmpty: !!data.soundTokId,
         });
@@ -222,7 +239,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           return;
         }
 
-        const clientMessageId = data.clientMessageId || `${userId}_${Date.now()}_${Math.random()}`;
+        const clientMessageId = data.clientMessageId;
 
         const result = await chatService.sendMessage({
           content: validation.content ?? '',
@@ -281,6 +298,11 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Mark messages as read
     socket.on('message:read', async (data) => {
       try {
+        if (!isSafeIdentifier(data.chatId) || !Array.isArray(data.messageIds)
+          || data.messageIds.length > MAX_MESSAGE_IDS_PER_READ
+          || data.messageIds.some((id) => !isSafeIdentifier(id))) {
+          return;
+        }
         const result = await chatService.markMessagesAsRead(
           data.messageIds,
           userId,
@@ -306,7 +328,11 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // Mark single message as delivered (used when receiving)
     socket.on('message:deliver', async (data) => {
       try {
-        if (!data.chatId) return;
+        if (!isSafeIdentifier(data.chatId) || !isSafeIdentifier(data.messageId)) return;
+        const isMember = await chatRepository.isChatMember(data.chatId, userId);
+        if (!isMember) return;
+        const message = await messageRepository.getMessageForDelivery(data.messageId, data.chatId);
+        if (!message || message.receiverId !== userId) return;
         socket.to(`chat:${data.chatId}`).emit('message:delivered', {
           clientMessageId: '',
           messageId: data.messageId,
@@ -317,7 +343,12 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     });
 
     // Typing indicator
-    socket.on('chat:typing', (data) => {
+    socket.on('chat:typing', async (data) => {
+      if (!isSafeIdentifier(data.chatId) || typeof data.isTyping !== 'boolean') return;
+      const rateLimit = checkRateLimit(`typing:${userId}:${data.chatId}`, 20, 10_000);
+      if (!rateLimit.allowed) return;
+      const isMember = await chatRepository.isChatMember(data.chatId, userId);
+      if (!isMember) return;
       socket.to(`chat:${data.chatId}`).emit('chat:typing', {
         chatId: data.chatId,
         userId,
@@ -329,7 +360,13 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
     // USER SUBSCRIPTION EVENTS
     // ─────────────────────────────────────────
 
-    socket.on('user:subscribe', (targetUserId: string) => {
+    socket.on('user:subscribe', async (targetUserId: string) => {
+      if (!isSafeIdentifier(targetUserId) || targetUserId === userId) return;
+      const sharesChat = await chatRepository.usersShareChat(userId, targetUserId);
+      if (!sharesChat) {
+        socket.emit('error', { message: 'Presence access denied', code: 'PRESENCE_DENIED' });
+        return;
+      }
       socket.join(`user:${targetUserId}`);
       socket.emit('user:online', {
         userId: targetUserId,

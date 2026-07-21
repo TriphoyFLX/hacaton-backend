@@ -7,6 +7,8 @@ import { blockRepository } from '../repositories/blockRepository';
 import { validateMessageContent } from '../utils/messageValidation';
 
 const prisma = new PrismaClient();
+const MAX_GROUP_MEMBERS = 100;
+const MAX_GROUP_NAME_LENGTH = 120;
 
 export interface SendMessageResult {
   success: boolean;
@@ -155,13 +157,16 @@ export class ChatService {
     memberIds: string[]
   ): Promise<{ success: boolean; chat?: ChatWithUsers; error?: string }> {
     const trimmedName = name?.trim();
-    if (!trimmedName || trimmedName.length < 2) {
-      return { success: false, error: 'Название группы должно быть минимум 2 символа' };
+    if (!trimmedName || trimmedName.length < 2 || trimmedName.length > MAX_GROUP_NAME_LENGTH) {
+      return { success: false, error: `Название группы должно быть от 2 до ${MAX_GROUP_NAME_LENGTH} символов` };
     }
 
-    const uniqueMembers = [...new Set(memberIds.filter((id) => id !== creatorId))];
+    const uniqueMembers = [...new Set(memberIds.filter((id) => typeof id === 'string' && id !== creatorId))];
     if (uniqueMembers.length < 1) {
       return { success: false, error: 'Добавьте хотя бы одного участника' };
+    }
+    if (uniqueMembers.length > MAX_GROUP_MEMBERS - 1) {
+      return { success: false, error: `В группе может быть не больше ${MAX_GROUP_MEMBERS} участников` };
     }
 
     for (const memberId of uniqueMembers) {
@@ -198,6 +203,9 @@ export class ChatService {
     userId: string,
     chatId: string
   ): Promise<{ count: number; updatedIds: string[] }> {
+    if (messageIds.length === 0 || messageIds.length > 100) {
+      return { count: 0, updatedIds: [] };
+    }
     const isMember = await chatRepository.isChatMember(chatId, userId);
     if (!isMember) {
       return { count: 0, updatedIds: [] };
@@ -240,12 +248,7 @@ export class ChatService {
     chatId: string,
     userId: string
   ): Promise<string[]> {
-    const messages = await messageRepository.getMessagesByChatId(chatId);
-    const validIds = new Set(
-      messages
-        .filter((m) => m.receiverId === userId && messageIds.includes(m.id))
-        .map((m) => m.id)
-    );
+    const validIds = new Set(await messageRepository.getReadableMessageIds(messageIds, chatId, userId));
     return messageIds.filter((id) => validIds.has(id));
   }
 }

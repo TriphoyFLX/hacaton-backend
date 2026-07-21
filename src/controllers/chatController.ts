@@ -10,6 +10,9 @@ import { getIO } from '../websocket/socketServer';
 
 const MESSAGE_RATE_LIMIT = 30;
 const MESSAGE_RATE_WINDOW_MS = 60_000;
+const GROUP_CREATE_RATE_LIMIT = 5;
+const GROUP_CREATE_RATE_WINDOW_MS = 60 * 60_000;
+const MAX_READ_MESSAGE_IDS = 100;
 
 function formatChat(chat: any, currentUserId: string, unreadCount = 0) {
   const currentMembership = chat.users.find((u: any) => u.userId === currentUserId);
@@ -117,10 +120,12 @@ export async function getMessages(req: AuthenticatedRequest, res: Response) {
 
     const { chatId } = req.params;
     const { cursor, limit = '50' } = req.query;
+    const parsedLimit = Number.parseInt(String(limit), 10);
+    const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 100) : 50;
 
     const chatInfo = await chatService.getChatHistory(chatId, req.user.id, {
-      cursor: cursor as string | undefined,
-      limit: parseInt(limit as string, 10),
+      cursor: typeof cursor === 'string' && cursor.length <= 128 ? cursor : undefined,
+      limit: safeLimit,
     });
 
     if (!chatInfo) {
@@ -188,6 +193,17 @@ export async function createGroup(req: AuthenticatedRequest, res: Response) {
     if (!Array.isArray(memberIds)) {
       return res.status(400).json({ error: 'memberIds must be an array' });
     }
+    const rateLimit = checkRateLimit(
+      `group-create:${req.user.id}`,
+      GROUP_CREATE_RATE_LIMIT,
+      GROUP_CREATE_RATE_WINDOW_MS,
+    );
+    if (!rateLimit.allowed) {
+      return res.status(429).json({
+        error: 'Слишком много новых групп. Попробуйте позже.',
+        retryAfterMs: rateLimit.retryAfterMs,
+      });
+    }
 
     const result = await chatService.createGroup(req.user.id, name, memberIds);
     if (!result.success || !result.chat) {
@@ -253,6 +269,9 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     if (!soundTokId && !validation.content) {
       return res.status(400).json({ error: 'Сообщение не может быть пустым' });
     }
+    if (clientMessageId !== undefined && (typeof clientMessageId !== 'string' || clientMessageId.length < 1 || clientMessageId.length > 128)) {
+      return res.status(400).json({ error: 'Invalid client message ID' });
+    }
 
     const rateLimit = checkRateLimit(
       messageRateLimitKey(req.user.id),
@@ -309,6 +328,9 @@ export async function markAsRead(req: AuthenticatedRequest, res: Response) {
 
     if (!Array.isArray(messageIds)) {
       return res.status(400).json({ error: 'Message IDs array required' });
+    }
+    if (messageIds.length > MAX_READ_MESSAGE_IDS || messageIds.some((id) => typeof id !== 'string' || id.length > 128)) {
+      return res.status(400).json({ error: `At most ${MAX_READ_MESSAGE_IDS} valid message IDs are allowed` });
     }
 
     const result = await chatService.markMessagesAsRead(

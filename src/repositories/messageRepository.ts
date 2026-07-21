@@ -136,6 +136,25 @@ export class MessageRepository {
     return result.count;
   }
 
+  async getReadableMessageIds(messageIds: string[], chatId: string, receiverId: string): Promise<string[]> {
+    const messages = await prisma.message.findMany({
+      where: {
+        id: { in: messageIds },
+        chatId,
+        receiverId,
+      },
+      select: { id: true },
+    });
+    return messages.map((message) => message.id);
+  }
+
+  async getMessageForDelivery(messageId: string, chatId: string) {
+    return prisma.message.findFirst({
+      where: { id: messageId, chatId },
+      select: { id: true, receiverId: true },
+    });
+  }
+
   /**
    * Mark messages as delivered for a user in a chat
    */
