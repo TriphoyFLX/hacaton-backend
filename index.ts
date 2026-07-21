@@ -73,7 +73,7 @@ const storage = multer.diskStorage({
   }
 });
 
-const SOUNDTOK_MAX_BYTES = 100 * 1024 * 1024; // 100MB — matches SoundTok UI
+const SOUNDTOK_MAX_BYTES = 15 * 1024 * 1024; // 15MB — matches SoundTok UI
 
 const upload = multer({
   storage,
@@ -1064,7 +1064,7 @@ app.post('/api/soundtok', (req, res, next) => {
   upload.single('video')(req, res, (error: unknown) => {
     if (!error) return next();
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: 'Video must not exceed 100 MB' });
+      return res.status(413).json({ error: 'Video must not exceed 15 MB' });
     }
     console.warn('SoundTok multer error:', error);
     return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid video' });
