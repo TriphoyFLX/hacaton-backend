@@ -26,6 +26,8 @@ import {
   isYooKassaConfigured,
 } from './src/services/yookassaService';
 import { PLAN_CATALOG, TOKEN_PACKS, TOKENS_PER_GENERATION } from './src/config/plans';
+import { applyBattleEloResult } from './src/services/battleEloService';
+import { BATTLE_ELO_DEFAULT, battleRatingPayload, getBattleRank } from './src/services/battleRating';
 import {
   exchangeGoogleCode,
   exchangeVkCode,
@@ -1653,6 +1655,12 @@ app.get('/api/users/available', authenticateToken, async (req: AuthenticatedRequ
       select: {
         id: true,
         username: true,
+        displayName: true,
+        avatar: true,
+        battleElo: true,
+        battleWins: true,
+        battleLosses: true,
+        battleDraws: true,
         createdAt: true,
         _count: {
           select: {
@@ -1662,14 +1670,231 @@ app.get('/api/users/available', authenticateToken, async (req: AuthenticatedRequ
         }
       },
       orderBy: {
-        createdAt: 'desc'
+        battleElo: 'desc'
       }
     });
-    
-    res.json(users);
+
+    res.json(
+      users.map((u) => ({
+        ...u,
+        ...battleRatingPayload(u),
+      }))
+    );
   } catch (error) {
     console.error('Error fetching available users:', error);
     res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+app.get('/api/battles/me/rating', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { battleElo: true, battleWins: true, battleLosses: true, battleDraws: true },
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(battleRatingPayload(user));
+  } catch (error) {
+    console.error('Error fetching battle rating:', error);
+    res.status(500).json({ error: 'Failed to fetch rating' });
+  }
+});
+
+async function tryMatchBattleQueue(userId: string) {
+  const me = await prisma.battleQueueEntry.findUnique({ where: { userId } });
+  if (!me) return null;
+
+  const windows = [100, 200, 400, 800, 2000];
+  for (const window of windows) {
+    const candidates = await prisma.battleQueueEntry.findMany({
+      where: {
+        userId: { not: userId },
+        elo: { gte: me.elo - window, lte: me.elo + window },
+      },
+      orderBy: { joinedAt: 'asc' },
+      take: 20,
+    });
+    if (!candidates.length) continue;
+
+    // Closest elo, then oldest
+    candidates.sort((a, b) => {
+      const da = Math.abs(a.elo - me.elo);
+      const db = Math.abs(b.elo - me.elo);
+      if (da !== db) return da - db;
+      return a.joinedAt.getTime() - b.joinedAt.getTime();
+    });
+
+    const opponent = candidates[0];
+    const creatorIsMe = me.joinedAt <= opponent.joinedAt;
+    const creator = creatorIsMe ? me : opponent;
+    const opp = creatorIsMe ? opponent : me;
+
+    const battle = await prisma.$transaction(async (tx) => {
+      // Re-check both still in queue
+      const stillMe = await tx.battleQueueEntry.findUnique({ where: { userId: me.userId } });
+      const stillOpp = await tx.battleQueueEntry.findUnique({ where: { userId: opponent.userId } });
+      if (!stillMe || !stillOpp) return null;
+
+      const created = await tx.battle.create({
+        data: {
+          title: creator.title || 'Ranked Battle',
+          description: 'Подбор по рейтингу',
+          creatorId: creator.userId,
+          status: creator.beatUrl ? 'USER1_TURN' : 'SELECTING_BEAT',
+          beatUrl: creator.beatUrl || null,
+          beatName: creator.beatName || null,
+          participants: {
+            create: [
+              { userId: creator.userId, role: 'CREATOR', acceptedAt: new Date() },
+              { userId: opp.userId, role: 'OPPONENT', acceptedAt: new Date() },
+            ],
+          },
+        },
+        include: {
+          creator: { select: { id: true, username: true, battleElo: true } },
+          participants: {
+            include: {
+              user: { select: { id: true, username: true, battleElo: true, battleWins: true, battleLosses: true, battleDraws: true } },
+            },
+          },
+          recordings: true,
+          _count: { select: { recordings: true } },
+        },
+      });
+
+      await tx.battleQueueEntry.deleteMany({
+        where: { userId: { in: [me.userId, opponent.userId] } },
+      });
+
+      return created;
+    });
+
+    return battle;
+  }
+
+  return null;
+}
+
+app.post('/api/battles/queue', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = req.user.id;
+    const title = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.trim().slice(0, 80)
+      : 'Ranked Battle';
+    const beatUrl = typeof req.body?.beatUrl === 'string' ? req.body.beatUrl : null;
+    const beatName = typeof req.body?.beatName === 'string' ? req.body.beatName : null;
+
+    if (!beatUrl) {
+      return res.status(400).json({ error: 'Beat is required to join ranked queue' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { battleElo: true },
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    await prisma.battleQueueEntry.upsert({
+      where: { userId },
+      create: {
+        userId,
+        elo: user.battleElo ?? BATTLE_ELO_DEFAULT,
+        title,
+        beatUrl,
+        beatName,
+      },
+      update: {
+        elo: user.battleElo ?? BATTLE_ELO_DEFAULT,
+        title,
+        beatUrl,
+        beatName,
+        joinedAt: new Date(),
+      },
+    });
+
+    const matched = await tryMatchBattleQueue(userId);
+    if (matched) {
+      return res.json({ status: 'matched', battle: matched });
+    }
+
+    const waiting = await prisma.battleQueueEntry.count();
+    const fullUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { battleElo: true, battleWins: true, battleLosses: true, battleDraws: true },
+    });
+    res.json({
+      status: 'waiting',
+      elo: user.battleElo ?? BATTLE_ELO_DEFAULT,
+      rank: battleRatingPayload(fullUser || user),
+      queueSize: waiting,
+    });
+  } catch (error) {
+    console.error('Error joining battle queue:', error);
+    res.status(500).json({ error: 'Failed to join queue' });
+  }
+});
+
+app.get('/api/battles/queue/status', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = req.user.id;
+
+    // If already matched into an active battle recently, surface it
+    const active = await prisma.battle.findFirst({
+      where: {
+        status: { in: ['SELECTING_BEAT', 'USER1_TURN', 'USER2_TURN', 'JUDGING'] },
+        OR: [
+          { creatorId: userId },
+          { participants: { some: { userId } } },
+        ],
+        createdAt: { gte: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        creator: { select: { id: true, username: true, battleElo: true } },
+        participants: {
+          include: {
+            user: { select: { id: true, username: true, battleElo: true, battleWins: true, battleLosses: true, battleDraws: true } },
+          },
+        },
+        recordings: true,
+        _count: { select: { recordings: true } },
+      },
+    });
+
+    const entry = await prisma.battleQueueEntry.findUnique({ where: { userId } });
+    if (!entry) {
+      if (active) return res.json({ status: 'matched', battle: active });
+      return res.json({ status: 'idle' });
+    }
+
+    const matched = await tryMatchBattleQueue(userId);
+    if (matched) return res.json({ status: 'matched', battle: matched });
+
+    const waiting = await prisma.battleQueueEntry.count();
+    res.json({
+      status: 'waiting',
+      elo: entry.elo,
+      rank: getBattleRank(entry.elo),
+      queueSize: waiting,
+      joinedAt: entry.joinedAt,
+    });
+  } catch (error) {
+    console.error('Error checking battle queue:', error);
+    res.status(500).json({ error: 'Failed to check queue' });
+  }
+});
+
+app.delete('/api/battles/queue', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    await prisma.battleQueueEntry.deleteMany({ where: { userId: req.user.id } });
+    res.json({ success: true, status: 'idle' });
+  } catch (error) {
+    console.error('Error leaving battle queue:', error);
+    res.status(500).json({ error: 'Failed to leave queue' });
   }
 });
 
@@ -2308,6 +2533,7 @@ app.post('/api/battles/:id/rate', authenticateToken, async (req: AuthenticatedRe
           judgedAt: new Date()
         }
       });
+      await applyBattleEloResult(battleId, result.winner);
       result.status = 'FINISHED';
     }
 
@@ -2442,6 +2668,7 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req: AuthenticatedR
         judgedAt: new Date()
       }
     });
+    await applyBattleEloResult(battleId, winner);
     
     res.json({
       judge,

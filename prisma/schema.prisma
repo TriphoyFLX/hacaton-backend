@@ -93,6 +93,12 @@ model User {
   /// YYYY-MM-DD (UTC) bucket for Platinum daily cloud-save cap
   midiSavesDayKey   String?
   midiSavesToday    Int       @default(0)
+
+  // Rap Battle ladder
+  battleElo     Int @default(1000)
+  battleWins    Int @default(0)
+  battleLosses  Int @default(0)
+  battleDraws   Int @default(0)
   
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -108,6 +114,7 @@ model User {
   battleParticipants BattleParticipant[]
   battleRecordings BattleRecording[]
   battleRatings BattleRating[]
+  battleQueueEntry BattleQueueEntry?
   midiProjects MidiProject[]
   midiSamples MidiSample[]
   presets     Preset[]         @relation("PresetSeller")
@@ -456,6 +463,7 @@ model Battle {
   winner      BattleWinner?
   judgedBy    String?      // ID of AI judge or user judge
   judgedAt    DateTime?
+  eloApplied  Boolean      @default(false)
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
@@ -465,6 +473,21 @@ model Battle {
   ratings     BattleRating[]
 
   @@map("battles")
+}
+
+model BattleQueueEntry {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  elo       Int
+  title     String   @default("Ranked Battle")
+  beatUrl   String?
+  beatName  String?
+  joinedAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([elo, joinedAt])
+  @@map("battle_queue_entries")
 }
 
 model BattleParticipant {

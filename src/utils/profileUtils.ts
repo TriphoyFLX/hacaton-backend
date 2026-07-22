@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import { battleRatingPayload } from '../services/battleRating';
 
 export function getAvatarFilePath(avatarUrl: string, uploadsDir?: string): string {
   const baseDir = uploadsDir ?? path.join(process.cwd(), 'uploads');
@@ -31,6 +32,19 @@ export interface ProfileJson {
   followersCount?: number;
   followingCount?: number;
   isFollowing?: boolean;
+  battleElo?: number;
+  battleWins?: number;
+  battleLosses?: number;
+  battleDraws?: number;
+  battleGames?: number;
+  rankId?: string;
+  rankLabel?: string;
+  rankMin?: number;
+  rankMax?: number;
+  nextRankLabel?: string | null;
+  nextRankMin?: number | null;
+  progressInRank?: number;
+  scaleProgress?: number;
 }
 
 export function serializeProfile(
@@ -45,6 +59,10 @@ export function serializeProfile(
     role?: string;
     createdAt: Date;
     updatedAt?: Date;
+    battleElo?: number | null;
+    battleWins?: number | null;
+    battleLosses?: number | null;
+    battleDraws?: number | null;
   },
   options: {
     includeEmail?: boolean;
@@ -54,6 +72,7 @@ export function serializeProfile(
   } = {}
 ): ProfileJson {
   const isPrivate = options.visibility !== 'public';
+  const rating = battleRatingPayload(user);
 
   const result: ProfileJson = {
     id: user.id,
@@ -62,6 +81,7 @@ export function serializeProfile(
     avatar: user.avatar,
     bio: user.bio,
     createdAt: user.createdAt.toISOString(),
+    ...rating,
   };
 
   if (isPrivate && options.includeEmail && user.email) {

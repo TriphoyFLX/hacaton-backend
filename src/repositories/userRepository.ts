@@ -14,6 +14,10 @@ export interface UserProfile {
   role: string;
   createdAt: Date;
   updatedAt: Date;
+  battleElo?: number;
+  battleWins?: number;
+  battleLosses?: number;
+  battleDraws?: number;
 }
 
 export interface UpdateUserData {
@@ -40,6 +44,10 @@ export class UserRepository {
         role: true,
         createdAt: true,
         updatedAt: true,
+        battleElo: true,
+        battleWins: true,
+        battleLosses: true,
+        battleDraws: true,
       },
     });
 
@@ -149,6 +157,10 @@ export class UserRepository {
         role: true,
         createdAt: true,
         updatedAt: true,
+        battleElo: true,
+        battleWins: true,
+        battleLosses: true,
+        battleDraws: true,
       },
     });
   }
