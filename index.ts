@@ -1874,10 +1874,14 @@ app.get('/api/battles/queue/status', authenticateToken, async (req: Authenticate
     if (matched) return res.json({ status: 'matched', battle: matched });
 
     const waiting = await prisma.battleQueueEntry.count();
+    const fullUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { battleElo: true, battleWins: true, battleLosses: true, battleDraws: true },
+    });
     res.json({
       status: 'waiting',
       elo: entry.elo,
-      rank: getBattleRank(entry.elo),
+      rank: battleRatingPayload(fullUser || { battleElo: entry.elo }),
       queueSize: waiting,
       joinedAt: entry.joinedAt,
     });
