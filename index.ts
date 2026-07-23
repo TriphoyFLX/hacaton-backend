@@ -927,6 +927,16 @@ app.patch('/api/notifications/read', authenticateToken, async (req: Authenticate
   }
 });
 
+app.delete('/api/notifications', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const deletedCount = await notificationService.clear(req.user!.id);
+    res.json({ deletedCount, unreadCount: 0 });
+  } catch (error) {
+    console.error('Failed to clear notifications:', error);
+    res.status(500).json({ error: 'Failed to clear notifications' });
+  }
+});
+
 // Create post with media
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
   try {
