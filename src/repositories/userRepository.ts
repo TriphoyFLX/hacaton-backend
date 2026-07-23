@@ -11,6 +11,7 @@ export interface UserProfile {
   bio?: string | null;
   birthDate?: Date;
   role: string;
+  emailVerified?: boolean;
   createdAt: Date;
   updatedAt: Date;
   battleElo?: number;
@@ -41,6 +42,7 @@ export class UserRepository {
         bio: true,
         birthDate: true,
         role: true,
+        emailVerified: true,
         createdAt: true,
         updatedAt: true,
         battleElo: true,

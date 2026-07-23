@@ -3,13 +3,30 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.hashVerificationCode = hashVerificationCode;
+exports.verifyVerificationCode = verifyVerificationCode;
 exports.sendVerificationEmail = sendVerificationEmail;
 exports.sendAdminNotification = sendAdminNotification;
 exports.createVerificationPayload = createVerificationPayload;
 exports.isEmailConfigured = isEmailConfigured;
 const nodemailer_1 = __importDefault(require("nodemailer"));
+const crypto_1 = __importDefault(require("crypto"));
 function generateCode() {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return String(crypto_1.default.randomInt(100000, 1000000));
+}
+function hashVerificationCode(code) {
+    return crypto_1.default.createHash('sha256').update(code).digest('hex');
+}
+function verifyVerificationCode(storedCode, submittedCode) {
+    const submittedHash = hashVerificationCode(submittedCode);
+    const storedBuffer = Buffer.from(storedCode);
+    const submittedBuffer = Buffer.from(submittedHash);
+    if (storedBuffer.length === submittedBuffer.length) {
+        return crypto_1.default.timingSafeEqual(storedBuffer, submittedBuffer);
+    }
+    const legacyBuffer = Buffer.from(submittedCode);
+    return storedBuffer.length === legacyBuffer.length
+        && crypto_1.default.timingSafeEqual(storedBuffer, legacyBuffer);
 }
 function noreplyFrom() {
     return process.env.EMAIL_FROM || process.env.SMTP_FROM || 'SoundLab <noreply@soundlab-studio.ru>';

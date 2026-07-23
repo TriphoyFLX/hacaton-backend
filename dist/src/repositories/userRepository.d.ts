@@ -7,6 +7,7 @@ export interface UserProfile {
     bio?: string | null;
     birthDate?: Date;
     role: string;
+    emailVerified?: boolean;
     createdAt: Date;
     updatedAt: Date;
     battleElo?: number;

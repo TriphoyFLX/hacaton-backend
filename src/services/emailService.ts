@@ -1,7 +1,24 @@
 import nodemailer from 'nodemailer';
+import crypto from 'crypto';
 
 function generateCode(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+export function hashVerificationCode(code: string): string {
+  return crypto.createHash('sha256').update(code).digest('hex');
+}
+
+export function verifyVerificationCode(storedCode: string, submittedCode: string): boolean {
+  const submittedHash = hashVerificationCode(submittedCode);
+  const storedBuffer = Buffer.from(storedCode);
+  const submittedBuffer = Buffer.from(submittedHash);
+  if (storedBuffer.length === submittedBuffer.length) {
+    return crypto.timingSafeEqual(storedBuffer, submittedBuffer);
+  }
+  const legacyBuffer = Buffer.from(submittedCode);
+  return storedBuffer.length === legacyBuffer.length
+    && crypto.timingSafeEqual(storedBuffer, legacyBuffer);
 }
 
 function noreplyFrom(): string {

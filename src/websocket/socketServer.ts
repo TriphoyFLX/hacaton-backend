@@ -81,6 +81,9 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
       if (!user) {
         return next(new Error('User not found'));
       }
+      if (!user.emailVerified) {
+        return next(new Error('Email not verified'));
+      }
 
       socket.userId = decoded.userId;
       socket.username = user.username;

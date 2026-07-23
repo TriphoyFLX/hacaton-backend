@@ -6,12 +6,20 @@ import dotenv from 'dotenv';
 import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { createServer } from 'http';
 import { createProfileRouter } from './src/routes/profileRoutes';
 import { createFollowRouter } from './src/routes/followRoutes';
 import { createPresetRouter } from './src/routes/presetRoutes';
-import { createVerificationPayload, sendVerificationEmail, sendAdminNotification } from './src/services/emailService';
+import {
+  createVerificationPayload,
+  hashVerificationCode,
+  isEmailConfigured,
+  sendVerificationEmail,
+  sendAdminNotification,
+  verifyVerificationCode,
+} from './src/services/emailService';
 import {
   getBillingSnapshot,
   assertCanCreateMidiProject,
@@ -224,11 +232,56 @@ const REPORT_REASONS = [
 const REPORT_STATUSES = ['OPEN', 'REVIEWING', 'RESOLVED', 'DISMISSED'] as const;
 
 function signAuthToken(userId: string, role?: string) {
+  const expiresIn = (process.env.JWT_EXPIRES_IN || '7d') as jwt.SignOptions['expiresIn'];
   return jwt.sign(
     { userId, ...(role ? { role } : {}) },
     JWT_SECRET,
-    { expiresIn: '7d' }
+    { expiresIn }
   );
+}
+
+const OAUTH_STATE_COOKIE = 'soundlab_oauth_state';
+
+function parseCookie(req: Request, name: string): string | null {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator === -1) continue;
+    if (part.slice(0, separator).trim() === name) {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    }
+  }
+  return null;
+}
+
+function setOAuthStateCookie(res: Response, state: string): void {
+  res.cookie(OAUTH_STATE_COOKIE, state, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 10 * 60 * 1000,
+    path: '/api/auth',
+  });
+}
+
+function clearOAuthStateCookie(res: Response): void {
+  res.clearCookie(OAUTH_STATE_COOKIE, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/api/auth',
+  });
+}
+
+function hasValidOAuthState(req: Request): boolean {
+  const queryState = typeof req.query.state === 'string' ? req.query.state : '';
+  const cookieState = parseCookie(req, OAUTH_STATE_COOKIE) || '';
+  const queryBuffer = Buffer.from(queryState);
+  const cookieBuffer = Buffer.from(cookieState);
+  return queryBuffer.length > 0
+    && queryBuffer.length === cookieBuffer.length
+    && crypto.timingSafeEqual(queryBuffer, cookieBuffer);
 }
 
 function isValidEmail(email: string): boolean {
@@ -242,6 +295,9 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
 
     if (!username || !normalizedEmail || !password || !birthDate || !agreedToTerms) {
       return res.status(400).json({ error: 'All fields required and terms must be accepted' });
+    }
+    if (!isEmailConfigured()) {
+      return res.status(503).json({ error: 'Email service is temporarily unavailable' });
     }
 
     if (!isValidEmail(normalizedEmail)) {
@@ -279,7 +335,7 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
             password: hashedPassword,
             birthDate: new Date(birthDate),
             agreedToTerms: Boolean(agreedToTerms),
-            emailVerificationCode: code,
+            emailVerificationCode: hashVerificationCode(code),
             emailVerificationExpires: expires,
           },
         });
@@ -307,7 +363,7 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
         birthDate: new Date(birthDate),
         agreedToTerms: Boolean(agreedToTerms),
         emailVerified: false,
-        emailVerificationCode: code,
+        emailVerificationCode: hashVerificationCode(code),
         emailVerificationExpires: expires,
       },
     });
@@ -345,11 +401,14 @@ app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
 
     if (user.emailVerified) {
       const token = signAuthToken(user.id, user.role);
-      const { password: _, emailVerificationCode: __, ...publicUser } = user as any;
+      const publicUser = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: userPublicSelect,
+      });
       return res.json({ user: publicUser, token });
     }
 
-    if (!user.emailVerificationCode || user.emailVerificationCode !== code) {
+    if (!user.emailVerificationCode || !verifyVerificationCode(user.emailVerificationCode, code)) {
       return res.status(400).json({ error: 'Invalid verification code' });
     }
 
@@ -386,6 +445,9 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
     if (!email) {
       return res.status(400).json({ error: 'Email required' });
     }
+    if (!isEmailConfigured()) {
+      return res.status(503).json({ error: 'Email service is temporarily unavailable' });
+    }
 
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
@@ -399,7 +461,7 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
     await prisma.user.update({
       where: { id: user.id },
       data: {
-        emailVerificationCode: code,
+        emailVerificationCode: hashVerificationCode(code),
         emailVerificationExpires: expires,
       },
     });
@@ -496,11 +558,17 @@ app.get('/api/auth/google', (_req, res) => {
     return res.status(503).json({ error: 'Google OAuth is not configured' });
   }
   const state = oauthState();
+  setOAuthStateCookie(res, state);
   res.redirect(googleAuthUrl(state));
 });
 
 app.get('/api/auth/google/callback', async (req, res) => {
   try {
+    if (!hasValidOAuthState(req)) {
+      clearOAuthStateCookie(res);
+      return res.redirect(`${frontendUrl()}/login?error=oauth_state`);
+    }
+    clearOAuthStateCookie(res);
     const code = typeof req.query.code === 'string' ? req.query.code : '';
     if (!code) {
       return res.redirect(`${frontendUrl()}/login?error=google_denied`);
@@ -513,7 +581,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       googleId: profile.googleId,
     });
     const token = signAuthToken(user.id, user.role);
-    res.redirect(`${frontendUrl()}/auth/callback?token=${encodeURIComponent(token)}`);
+    res.redirect(`${frontendUrl()}/auth/callback#token=${encodeURIComponent(token)}`);
   } catch (error) {
     console.error('Google OAuth error:', error);
     res.redirect(`${frontendUrl()}/login?error=google_failed`);
@@ -525,11 +593,17 @@ app.get('/api/auth/vk', (_req, res) => {
     return res.status(503).json({ error: 'VK OAuth is not configured' });
   }
   const state = oauthState();
+  setOAuthStateCookie(res, state);
   res.redirect(vkAuthUrl(state));
 });
 
 app.get('/api/auth/vk/callback', async (req, res) => {
   try {
+    if (!hasValidOAuthState(req)) {
+      clearOAuthStateCookie(res);
+      return res.redirect(`${frontendUrl()}/login?error=oauth_state`);
+    }
+    clearOAuthStateCookie(res);
     const code = typeof req.query.code === 'string' ? req.query.code : '';
     if (!code) {
       return res.redirect(`${frontendUrl()}/login?error=vk_denied`);
@@ -542,7 +616,7 @@ app.get('/api/auth/vk/callback', async (req, res) => {
       vkId: profile.vkId,
     });
     const token = signAuthToken(user.id, user.role);
-    res.redirect(`${frontendUrl()}/auth/callback?token=${encodeURIComponent(token)}`);
+    res.redirect(`${frontendUrl()}/auth/callback#token=${encodeURIComponent(token)}`);
   } catch (error) {
     console.error('VK OAuth error:', error);
     res.redirect(`${frontendUrl()}/login?error=vk_failed`);
@@ -607,15 +681,24 @@ const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any)
         username: true,
         email: true,
         role: true,
-        createdAt: true
+        createdAt: true,
+        emailVerified: true,
       }
     });
 
     if (!user) {
       return res.status(401).json({ error: 'User not found' });
     }
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        error: 'Email not verified',
+        requiresVerification: true,
+        email: user.email,
+      });
+    }
 
-    req.user = user;
+    const { emailVerified: _emailVerified, ...authenticatedUser } = user;
+    req.user = authenticatedUser;
     next();
   } catch (error) {
     debugLog('Auth middleware: Invalid token -', error instanceof Error ? error.message : 'unknown error');

@@ -19,6 +19,7 @@ class UserRepository {
                 bio: true,
                 birthDate: true,
                 role: true,
+                emailVerified: true,
                 createdAt: true,
                 updatedAt: true,
                 battleElo: true,

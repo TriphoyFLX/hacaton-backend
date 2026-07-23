@@ -77,6 +77,9 @@ export async function exchangeGoogleCode(code: string): Promise<{
   if (!profile.email) {
     throw new Error('Google account has no email');
   }
+  if (profile.verified_email !== true) {
+    throw new Error('Google account email is not verified');
+  }
 
   return {
     email: profile.email.toLowerCase(),
@@ -196,10 +199,16 @@ export async function findOrCreateOAuthUser(input: {
   });
 
   if (user) {
+    const discardUnverifiedPassword = !user.emailVerified && Boolean(user.password);
     user = await prisma.user.update({
       where: { id: user.id },
       data: {
         emailVerified: true,
+        ...(discardUnverifiedPassword ? {
+          password: null,
+          emailVerificationCode: null,
+          emailVerificationExpires: null,
+        } : {}),
         ...(input.googleId && !user.googleId ? { googleId: input.googleId } : {}),
         ...(input.vkId && !user.vkId ? { vkId: input.vkId } : {}),
         ...(input.picture && !user.avatar ? { avatar: input.picture } : {}),

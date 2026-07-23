@@ -11,6 +11,7 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const multer_1 = __importDefault(require("multer"));
 const path_1 = __importDefault(require("path"));
 const fs_1 = __importDefault(require("fs"));
+const crypto_1 = __importDefault(require("crypto"));
 const zod_1 = require("zod");
 const http_1 = require("http");
 const profileRoutes_1 = require("./src/routes/profileRoutes");
@@ -188,7 +189,49 @@ const REPORT_REASONS = [
 ];
 const REPORT_STATUSES = ['OPEN', 'REVIEWING', 'RESOLVED', 'DISMISSED'];
 function signAuthToken(userId, role) {
-    return jsonwebtoken_1.default.sign({ userId, ...(role ? { role } : {}) }, JWT_SECRET, { expiresIn: '7d' });
+    const expiresIn = (process.env.JWT_EXPIRES_IN || '7d');
+    return jsonwebtoken_1.default.sign({ userId, ...(role ? { role } : {}) }, JWT_SECRET, { expiresIn });
+}
+const OAUTH_STATE_COOKIE = 'soundlab_oauth_state';
+function parseCookie(req, name) {
+    const cookieHeader = req.headers.cookie;
+    if (!cookieHeader)
+        return null;
+    for (const part of cookieHeader.split(';')) {
+        const separator = part.indexOf('=');
+        if (separator === -1)
+            continue;
+        if (part.slice(0, separator).trim() === name) {
+            return decodeURIComponent(part.slice(separator + 1).trim());
+        }
+    }
+    return null;
+}
+function setOAuthStateCookie(res, state) {
+    res.cookie(OAUTH_STATE_COOKIE, state, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: 10 * 60 * 1000,
+        path: '/api/auth',
+    });
+}
+function clearOAuthStateCookie(res) {
+    res.clearCookie(OAUTH_STATE_COOKIE, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/api/auth',
+    });
+}
+function hasValidOAuthState(req) {
+    const queryState = typeof req.query.state === 'string' ? req.query.state : '';
+    const cookieState = parseCookie(req, OAUTH_STATE_COOKIE) || '';
+    const queryBuffer = Buffer.from(queryState);
+    const cookieBuffer = Buffer.from(cookieState);
+    return queryBuffer.length > 0
+        && queryBuffer.length === cookieBuffer.length
+        && crypto_1.default.timingSafeEqual(queryBuffer, cookieBuffer);
 }
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -199,6 +242,9 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
         const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
         if (!username || !normalizedEmail || !password || !birthDate || !agreedToTerms) {
             return res.status(400).json({ error: 'All fields required and terms must be accepted' });
+        }
+        if (!(0, emailService_1.isEmailConfigured)()) {
+            return res.status(503).json({ error: 'Email service is temporarily unavailable' });
         }
         if (!isValidEmail(normalizedEmail)) {
             return res.status(400).json({ error: 'Invalid email address' });
@@ -231,7 +277,7 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
                         password: hashedPassword,
                         birthDate: new Date(birthDate),
                         agreedToTerms: Boolean(agreedToTerms),
-                        emailVerificationCode: code,
+                        emailVerificationCode: (0, emailService_1.hashVerificationCode)(code),
                         emailVerificationExpires: expires,
                     },
                 });
@@ -257,7 +303,7 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
                 birthDate: new Date(birthDate),
                 agreedToTerms: Boolean(agreedToTerms),
                 emailVerified: false,
-                emailVerificationCode: code,
+                emailVerificationCode: (0, emailService_1.hashVerificationCode)(code),
                 emailVerificationExpires: expires,
             },
         });
@@ -287,10 +333,13 @@ app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
         }
         if (user.emailVerified) {
             const token = signAuthToken(user.id, user.role);
-            const { password: _, emailVerificationCode: __, ...publicUser } = user;
+            const publicUser = await prisma_1.prisma.user.findUnique({
+                where: { id: user.id },
+                select: userPublicSelect,
+            });
             return res.json({ user: publicUser, token });
         }
-        if (!user.emailVerificationCode || user.emailVerificationCode !== code) {
+        if (!user.emailVerificationCode || !(0, emailService_1.verifyVerificationCode)(user.emailVerificationCode, code)) {
             return res.status(400).json({ error: 'Invalid verification code' });
         }
         if (!user.emailVerificationExpires || user.emailVerificationExpires < new Date()) {
@@ -320,6 +369,9 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
         if (!email) {
             return res.status(400).json({ error: 'Email required' });
         }
+        if (!(0, emailService_1.isEmailConfigured)()) {
+            return res.status(503).json({ error: 'Email service is temporarily unavailable' });
+        }
         const user = await prisma_1.prisma.user.findUnique({ where: { email } });
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
@@ -331,7 +383,7 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
         await prisma_1.prisma.user.update({
             where: { id: user.id },
             data: {
-                emailVerificationCode: code,
+                emailVerificationCode: (0, emailService_1.hashVerificationCode)(code),
                 emailVerificationExpires: expires,
             },
         });
@@ -415,10 +467,16 @@ app.get('/api/auth/google', (_req, res) => {
         return res.status(503).json({ error: 'Google OAuth is not configured' });
     }
     const state = (0, oauthService_1.oauthState)();
+    setOAuthStateCookie(res, state);
     res.redirect((0, oauthService_1.googleAuthUrl)(state));
 });
 app.get('/api/auth/google/callback', async (req, res) => {
     try {
+        if (!hasValidOAuthState(req)) {
+            clearOAuthStateCookie(res);
+            return res.redirect(`${(0, oauthService_1.frontendUrl)()}/login?error=oauth_state`);
+        }
+        clearOAuthStateCookie(res);
         const code = typeof req.query.code === 'string' ? req.query.code : '';
         if (!code) {
             return res.redirect(`${(0, oauthService_1.frontendUrl)()}/login?error=google_denied`);
@@ -431,7 +489,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
             googleId: profile.googleId,
         });
         const token = signAuthToken(user.id, user.role);
-        res.redirect(`${(0, oauthService_1.frontendUrl)()}/auth/callback?token=${encodeURIComponent(token)}`);
+        res.redirect(`${(0, oauthService_1.frontendUrl)()}/auth/callback#token=${encodeURIComponent(token)}`);
     }
     catch (error) {
         console.error('Google OAuth error:', error);
@@ -443,10 +501,16 @@ app.get('/api/auth/vk', (_req, res) => {
         return res.status(503).json({ error: 'VK OAuth is not configured' });
     }
     const state = (0, oauthService_1.oauthState)();
+    setOAuthStateCookie(res, state);
     res.redirect((0, oauthService_1.vkAuthUrl)(state));
 });
 app.get('/api/auth/vk/callback', async (req, res) => {
     try {
+        if (!hasValidOAuthState(req)) {
+            clearOAuthStateCookie(res);
+            return res.redirect(`${(0, oauthService_1.frontendUrl)()}/login?error=oauth_state`);
+        }
+        clearOAuthStateCookie(res);
         const code = typeof req.query.code === 'string' ? req.query.code : '';
         if (!code) {
             return res.redirect(`${(0, oauthService_1.frontendUrl)()}/login?error=vk_denied`);
@@ -459,7 +523,7 @@ app.get('/api/auth/vk/callback', async (req, res) => {
             vkId: profile.vkId,
         });
         const token = signAuthToken(user.id, user.role);
-        res.redirect(`${(0, oauthService_1.frontendUrl)()}/auth/callback?token=${encodeURIComponent(token)}`);
+        res.redirect(`${(0, oauthService_1.frontendUrl)()}/auth/callback#token=${encodeURIComponent(token)}`);
     }
     catch (error) {
         console.error('VK OAuth error:', error);
@@ -509,13 +573,22 @@ const authenticateToken = async (req, res, next) => {
                 username: true,
                 email: true,
                 role: true,
-                createdAt: true
+                createdAt: true,
+                emailVerified: true,
             }
         });
         if (!user) {
             return res.status(401).json({ error: 'User not found' });
         }
-        req.user = user;
+        if (!user.emailVerified) {
+            return res.status(403).json({
+                error: 'Email not verified',
+                requiresVerification: true,
+                email: user.email,
+            });
+        }
+        const { emailVerified: _emailVerified, ...authenticatedUser } = user;
+        req.user = authenticatedUser;
         next();
     }
     catch (error) {
