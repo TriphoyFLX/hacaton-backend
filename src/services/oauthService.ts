@@ -1,8 +1,7 @@
 import crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import { sendAdminNotification } from './emailService';
 
-const prisma = new PrismaClient();
 
 export function frontendUrl(): string {
   return (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');

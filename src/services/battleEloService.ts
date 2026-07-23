@@ -1,7 +1,7 @@
-import { PrismaClient, BattleWinner } from '@prisma/client';
+import { BattleWinner } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import { BATTLE_ELO_DEFAULT, nextElo } from './battleRating';
 
-const prisma = new PrismaClient();
 
 /**
  * Apply Elo + W/L once when a battle finishes.

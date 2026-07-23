@@ -1,4 +1,5 @@
-import { ChatType, PrismaClient } from '@prisma/client';
+import { ChatType } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import { messageRepository } from '../repositories/messageRepository';
 import { MessageWithSender } from '../types';
 import { chatRepository, ChatWithUsers } from '../repositories/chatRepository';
@@ -6,7 +7,6 @@ import { userRepository } from '../repositories/userRepository';
 import { blockRepository } from '../repositories/blockRepository';
 import { validateMessageContent } from '../utils/messageValidation';
 
-const prisma = new PrismaClient();
 const MAX_GROUP_MEMBERS = 100;
 const MAX_GROUP_NAME_LENGTH = 120;
 

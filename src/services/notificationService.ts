@@ -1,7 +1,7 @@
-import { NotificationType, PrismaClient } from '@prisma/client';
+import { NotificationType } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import { getIO } from '../websocket/socketServer';
 
-const prisma = new PrismaClient();
 
 export type NotificationPayload = {
   id: string;

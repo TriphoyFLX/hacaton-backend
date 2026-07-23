@@ -1,6 +1,6 @@
-import { PrismaClient, ChatType } from '@prisma/client';
+import { ChatType } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 
-const prisma = new PrismaClient();
 
 const chatUserInclude = {
   include: {

@@ -2,7 +2,6 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
@@ -43,12 +42,17 @@ import { createSocketServer, getUserOnlineStatus } from './src/websocket/socketS
 import { notificationService } from './src/services/notificationService';
 import { rateLimitMiddleware } from './src/utils/rateLimiter';
 import { corsOptions, requireJwtSecret, securityHeaders } from './src/middleware/security';
+import { compressionMiddleware } from './src/middleware/compression';
 import { validateMessageContent } from './src/utils/messageValidation';
+import { prisma } from './src/lib/prisma';
 
 dotenv.config();
 const JWT_SECRET = requireJwtSecret();
 const app = express();
-const prisma = new PrismaClient();
+const isProd = process.env.NODE_ENV === 'production';
+const debugLog = (...args: unknown[]) => {
+  if (!isProd) console.log(...args);
+};
 
 // Behind nginx — trust X-Forwarded-For for rate limits / logs
 app.set('trust proxy', 1);
@@ -135,8 +139,17 @@ const receiveMidiSample = (req: Request, res: Response, next: NextFunction) => {
 
 app.use(securityHeaders);
 app.use(cors(corsOptions()));
+app.use(compressionMiddleware);
 app.use(express.json({ limit: '5mb' }));
-app.use('/uploads', express.static(uploadsDir));
+app.use(
+  '/uploads',
+  express.static(uploadsDir, {
+    maxAge: isProd ? '7d' : 0,
+    etag: true,
+    lastModified: true,
+    immutable: false,
+  }),
+);
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ts: Date.now() });
@@ -559,18 +572,13 @@ interface AuthenticatedRequest extends Request {
 // Authentication middleware
 const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any) => {
   const authHeader = req.headers.authorization;
-  console.log(`Auth middleware - ${req.method} ${req.path} - auth header:`, authHeader ? 'present' : 'missing');
-  
   if (!authHeader) {
-    console.log('Auth middleware: No token provided');
     return res.status(401).json({ error: 'No token provided' });
   }
 
-  const token = authHeader.replace('Bearer ', '');
+  const token = authHeader.replace(/^Bearer\s+/i, '');
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { userId: string; role: string };
-    console.log('Auth middleware: Token decoded, userId:', decoded.userId);
-    
     const user = await prisma.user.findUnique({
       where: { id: decoded.userId },
       select: {
@@ -583,15 +591,13 @@ const authenticateToken = async (req: AuthenticatedRequest, res: any, next: any)
     });
 
     if (!user) {
-      console.log('Auth middleware: User not found for id:', decoded.userId);
       return res.status(401).json({ error: 'User not found' });
     }
 
-    console.log('Auth middleware: User authenticated:', user.username);
     req.user = user;
     next();
   } catch (error) {
-    console.log('Auth middleware: Invalid token -', error instanceof Error ? error.message : 'unknown error');
+    debugLog('Auth middleware: Invalid token -', error instanceof Error ? error.message : 'unknown error');
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -874,45 +880,75 @@ app.post('/api/posts', upload.array('media', 10), async (req, res) => {
   }
 });
 
-// Get all posts
+// Get posts (paginated — all posts remain reachable via offset)
 app.get('/api/posts', async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
     const sort = req.query.sort === 'trending' ? 'trending' : 'latest';
     const rawTag = typeof req.query.tag === 'string' ? req.query.tag : '';
     const tag = rawTag.replace(/^#/, '').trim().slice(0, 64);
-    const posts = await prisma.post.findMany({
-      where: tag ? {
-        content: {
-          contains: `#${tag}`,
-          mode: 'insensitive',
-        },
-      } : undefined,
-      include: {
-        media: true,
-        author: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true,
-            avatar: true,
-          }
-        },
-        likesList: userId ? {
-          where: { userId },
-          select: { id: true },
-        } : false,
-      },
-      orderBy: sort === 'trending'
-        ? [{ likes: 'desc' }, { commentsCount: 'desc' }, { createdAt: 'desc' }]
-        : { createdAt: 'desc' }
-    });
+    const take = Math.min(100, Math.max(1, Number(req.query.limit) || 30));
+    const skip = Math.max(0, Number(req.query.offset) || 0);
+    const where = tag
+      ? {
+          content: {
+            contains: `#${tag}`,
+            mode: 'insensitive' as const,
+          },
+        }
+      : undefined;
 
-    res.json(posts.map((post) => ({
+    const [posts, total] = await Promise.all([
+      prisma.post.findMany({
+        where,
+        select: {
+          id: true,
+          content: true,
+          authorId: true,
+          likes: true,
+          commentsCount: true,
+          views: true,
+          createdAt: true,
+          updatedAt: true,
+          media: { select: { id: true, type: true, url: true, createdAt: true } },
+          author: {
+            select: {
+              id: true,
+              username: true,
+              displayName: true,
+              avatar: true,
+            },
+          },
+          likesList: userId
+            ? {
+                where: { userId },
+                select: { id: true },
+              }
+            : false,
+        },
+        orderBy:
+          sort === 'trending'
+            ? [{ likes: 'desc' }, { commentsCount: 'desc' }, { createdAt: 'desc' }]
+            : { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      prisma.post.count({ where }),
+    ]);
+
+    const items = posts.map((post) => ({
       ...post,
-      isLiked: userId ? post.likesList.length > 0 : false,
+      isLiked: userId ? Boolean(post.likesList && post.likesList.length > 0) : false,
       likesList: undefined,
-    })));
+    }));
+
+    res.json({
+      items,
+      total,
+      limit: take,
+      offset: skip,
+      hasMore: skip + items.length < total,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch posts' });
@@ -1122,12 +1158,8 @@ app.post('/api/soundtok', (req, res, next) => {
   });
 }, async (req, res) => {
   try {
-    console.log('SoundTok upload - headers:', req.headers.authorization ? 'Auth header present' : 'No auth header');
-    console.log('SoundTok upload - body:', req.body);
-    console.log('SoundTok upload - file:', req.file);
-    
     const userId = getUserFromToken(req.headers.authorization);
-    console.log('SoundTok upload - userId:', userId);
+    debugLog('SoundTok upload', { userId: userId || null, hasFile: Boolean(req.file) });
     
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -1167,10 +1199,12 @@ app.post('/api/soundtok', (req, res, next) => {
   }
 });
 
-// Get all SoundToks
+// Get SoundToks (paginated — full catalog remains reachable via offset)
 app.get('/api/soundtok', async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
+    const take = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const skip = Math.max(0, Number(req.query.offset) || 0);
 
     let followingIds = new Set<string>();
     if (userId) {
@@ -1180,35 +1214,54 @@ app.get('/api/soundtok', async (req, res) => {
       });
       followingIds = new Set(follows.map((f) => f.followingId));
     }
-    
-    const soundToks = await prisma.soundTok.findMany({
-      include: {
-        author: {
-          select: {
-            id: true,
-            username: true
-          }
-        },
-        likesList: userId ? {
-          where: {
-            userId: userId
-          }
-        } : false
-      },
-      orderBy: {
-        createdAt: 'desc'
-      }
-    });
 
-    // Add isLiked field to each SoundTok
-    const soundToksWithIsLiked = soundToks.map(soundTok => ({
+    const [soundToks, total] = await Promise.all([
+      prisma.soundTok.findMany({
+        select: {
+          id: true,
+          description: true,
+          videoUrl: true,
+          authorId: true,
+          likes: true,
+          commentsCount: true,
+          createdAt: true,
+          updatedAt: true,
+          author: {
+            select: {
+              id: true,
+              username: true,
+              displayName: true,
+              avatar: true,
+            },
+          },
+          likesList: userId
+            ? {
+                where: { userId },
+                select: { id: true },
+              }
+            : false,
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      prisma.soundTok.count(),
+    ]);
+
+    const items = soundToks.map((soundTok) => ({
       ...soundTok,
-      isLiked: userId ? soundTok.likesList.length > 0 : false,
+      isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
       authorIsFollowed: userId ? followingIds.has(soundTok.authorId) : false,
-      likesList: undefined // Remove likesList from response
+      likesList: undefined,
     }));
 
-    res.json(soundToksWithIsLiked);
+    res.json({
+      items,
+      total,
+      limit: take,
+      offset: skip,
+      hasMore: skip + items.length < total,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch SoundToks' });
@@ -1489,24 +1542,230 @@ app.get('/api/search', async (req, res) => {
 });
 
 // Admin endpoints
-app.get('/api/admin/users', requireAdmin, async (req, res) => {
-  try {
-    const users = await prisma.user.findMany({
+const parseAdminPage = (req: { query: Record<string, unknown> }) => {
+  const take = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const skip = Math.max(0, Number(req.query.offset) || 0);
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  return { take, skip, q };
+};
+
+app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
+  const now = new Date();
+  const [
+    usersCount,
+    postsCount,
+    soundToksCount,
+    presetsPublished,
+    activePro,
+    activePlatinum,
+    paymentsByKind,
+    subscriptionAgg,
+    tokenAgg,
+    presetPurchasesCount,
+    presetRevenue,
+    pendingPayments,
+    recentPayments,
+    recentPresetPurchases,
+  ] = await Promise.all([
+    prisma.user.count(),
+    prisma.post.count(),
+    prisma.soundTok.count(),
+    prisma.preset.count({ where: { status: 'PUBLISHED' } }),
+    prisma.user.count({
+      where: { plan: 'PRO', OR: [{ planExpiresAt: null }, { planExpiresAt: { gt: now } }] },
+    }),
+    prisma.user.count({
+      where: { plan: 'PLATINUM', OR: [{ planExpiresAt: null }, { planExpiresAt: { gt: now } }] },
+    }),
+    prisma.payment.groupBy({
+      by: ['kind'],
+      where: { status: 'SUCCEEDED' },
+      _count: { _all: true },
+      _sum: { amountRub: true },
+    }),
+    prisma.payment.aggregate({
+      where: { status: 'SUCCEEDED', kind: { in: ['PLAN_PRO', 'PLAN_PLATINUM'] } },
+      _count: { _all: true },
+      _sum: { amountRub: true },
+    }),
+    prisma.payment.aggregate({
+      where: {
+        status: 'SUCCEEDED',
+        kind: { in: ['TOKENS_400', 'TOKENS_800', 'TOKENS_1200', 'TOKENS_2400'] },
+      },
+      _count: { _all: true },
+      _sum: { amountRub: true },
+    }),
+    prisma.presetPurchase.count({ where: { status: 'PAID' } }),
+    prisma.presetPurchase.aggregate({
+      where: { status: 'PAID' },
+      _sum: { amountCents: true },
+    }),
+    prisma.payment.count({ where: { status: { in: ['PENDING', 'WAITING_FOR_CAPTURE'] } } }),
+    prisma.payment.findMany({
+      where: { status: 'SUCCEEDED' },
+      orderBy: { createdAt: 'desc' },
+      take: 8,
+      select: {
+        id: true,
+        kind: true,
+        amountRub: true,
+        status: true,
+        createdAt: true,
+        user: { select: { id: true, username: true } },
+      },
+    }),
+    prisma.presetPurchase.findMany({
+      where: { status: 'PAID' },
+      orderBy: { purchasedAt: 'desc' },
+      take: 8,
+      select: {
+        id: true,
+        amountCents: true,
+        currency: true,
+        purchasedAt: true,
+        buyer: { select: { id: true, username: true } },
+        preset: { select: { id: true, title: true } },
+      },
+    }),
+  ]);
+
+  const subscriptionsCount = subscriptionAgg._count._all;
+  const subscriptionsRevenueRub = subscriptionAgg._sum.amountRub || 0;
+  const tokensCount = tokenAgg._count._all;
+  const tokensRevenueRub = tokenAgg._sum.amountRub || 0;
+  const paymentsRevenueRub = subscriptionsRevenueRub + tokensRevenueRub;
+
+  const byKind = Object.fromEntries(
+    paymentsByKind.map((row) => [
+      row.kind,
+      { count: row._count._all, revenueRub: row._sum.amountRub || 0 },
+    ]),
+  );
+
+  res.json({
+    totals: {
+      users: usersCount,
+      posts: postsCount,
+      soundToks: soundToksCount,
+      presetsPublished,
+      pendingPayments,
+    },
+    plans: {
+      activePro,
+      activePlatinum,
+      activePaid: activePro + activePlatinum,
+    },
+    purchases: {
+      subscriptions: { count: subscriptionsCount, revenueRub: subscriptionsRevenueRub },
+      tokens: { count: tokensCount, revenueRub: tokensRevenueRub },
+      presets: {
+        count: presetPurchasesCount,
+        revenueRub: Math.round((presetRevenue._sum.amountCents || 0) / 100),
+        revenueCents: presetRevenue._sum.amountCents || 0,
+      },
+      paymentsRevenueRub,
+      totalRevenueRub:
+        paymentsRevenueRub + Math.round((presetRevenue._sum.amountCents || 0) / 100),
+    },
+    byKind,
+    recent: {
+      payments: recentPayments,
+      presetPurchases: recentPresetPurchases,
+    },
+  });
+}));
+
+app.get('/api/admin/payments', requireAdmin, asyncRoute(async (req, res) => {
+  const { take, skip } = parseAdminPage(req);
+  const kind = typeof req.query.kind === 'string' ? req.query.kind : '';
+  const status = typeof req.query.status === 'string' ? req.query.status : 'SUCCEEDED';
+  const where: Record<string, unknown> = {};
+  if (status && status !== 'ALL') where.status = status;
+  if (kind === 'subscriptions') where.kind = { in: ['PLAN_PRO', 'PLAN_PLATINUM'] };
+  else if (kind === 'tokens') where.kind = { in: ['TOKENS_400', 'TOKENS_800', 'TOKENS_1200', 'TOKENS_2400'] };
+  else if (kind) where.kind = kind;
+
+  const [items, total] = await Promise.all([
+    prisma.payment.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take,
+      skip,
+      select: {
+        id: true,
+        kind: true,
+        status: true,
+        amountRub: true,
+        description: true,
+        yookassaPaymentId: true,
+        createdAt: true,
+        updatedAt: true,
+        user: { select: { id: true, username: true, email: true } },
+      },
+    }),
+    prisma.payment.count({ where }),
+  ]);
+  res.json({ items, total, limit: take, offset: skip });
+}));
+
+app.get('/api/admin/preset-purchases', requireAdmin, asyncRoute(async (req, res) => {
+  const { take, skip } = parseAdminPage(req);
+  const where = { status: 'PAID' as const };
+  const [items, total] = await Promise.all([
+    prisma.presetPurchase.findMany({
+      where,
+      orderBy: { purchasedAt: 'desc' },
+      take,
+      skip,
+      select: {
+        id: true,
+        amountCents: true,
+        currency: true,
+        status: true,
+        provider: true,
+        purchasedAt: true,
+        buyer: { select: { id: true, username: true, email: true } },
+        preset: { select: { id: true, title: true, priceCents: true } },
+      },
+    }),
+    prisma.presetPurchase.count({ where }),
+  ]);
+  res.json({ items, total, limit: take, offset: skip });
+}));
+
+app.get('/api/admin/users', requireAdmin, asyncRoute(async (req, res) => {
+  const { take, skip, q } = parseAdminPage(req);
+  const where = q
+    ? {
+        OR: [
+          { username: { contains: q, mode: 'insensitive' as const } },
+          { email: { contains: q, mode: 'insensitive' as const } },
+        ],
+      }
+    : {};
+  const [items, total] = await Promise.all([
+    prisma.user.findMany({
+      where,
       select: {
         id: true,
         username: true,
         email: true,
         role: true,
+        plan: true,
+        planExpiresAt: true,
+        tokenBalance: true,
         createdAt: true,
-        updatedAt: true
+        updatedAt: true,
       },
-      orderBy: { createdAt: 'desc' }
-    });
-    res.json(users);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch users' });
-  }
-});
+      orderBy: { createdAt: 'desc' },
+      take,
+      skip,
+    }),
+    prisma.user.count({ where }),
+  ]);
+  res.json({ items, total, limit: take, offset: skip });
+}));
 
 app.delete('/api/admin/users/:id', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
@@ -1555,25 +1814,25 @@ app.patch('/api/admin/users/:id/ban', requireAdmin, async (req: AuthenticatedReq
   }
 });
 
-app.get('/api/admin/posts', requireAdmin, async (req, res) => {
-  try {
-    const posts = await prisma.post.findMany({
-      include: {
-        media: true,
-        author: {
-          select: {
-            id: true,
-            username: true
-          }
-        }
+app.get('/api/admin/posts', requireAdmin, asyncRoute(async (req, res) => {
+  const { take, skip } = parseAdminPage(req);
+  const [items, total] = await Promise.all([
+    prisma.post.findMany({
+      select: {
+        id: true,
+        content: true,
+        createdAt: true,
+        author: { select: { id: true, username: true } },
+        media: { select: { id: true, type: true, url: true } },
       },
-      orderBy: { createdAt: 'desc' }
-    });
-    res.json(posts);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch posts' });
-  }
-});
+      orderBy: { createdAt: 'desc' },
+      take,
+      skip,
+    }),
+    prisma.post.count(),
+  ]);
+  res.json({ items, total, limit: take, offset: skip });
+}));
 
 app.delete('/api/admin/posts/:id', requireAdmin, async (req, res) => {
   try {
@@ -1585,24 +1844,26 @@ app.delete('/api/admin/posts/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/admin/soundtoks', requireAdmin, async (req, res) => {
-  try {
-    const soundToks = await prisma.soundTok.findMany({
-      include: {
-        author: {
-          select: {
-            id: true,
-            username: true
-          }
-        }
+app.get('/api/admin/soundtoks', requireAdmin, asyncRoute(async (req, res) => {
+  const { take, skip } = parseAdminPage(req);
+  const [items, total] = await Promise.all([
+    prisma.soundTok.findMany({
+      select: {
+        id: true,
+        description: true,
+        videoUrl: true,
+        likes: true,
+        createdAt: true,
+        author: { select: { id: true, username: true } },
       },
-      orderBy: { createdAt: 'desc' }
-    });
-    res.json(soundToks);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch soundtoks' });
-  }
-});
+      orderBy: { createdAt: 'desc' },
+      take,
+      skip,
+    }),
+    prisma.soundTok.count(),
+  ]);
+  res.json({ items, total, limit: take, offset: skip });
+}));
 
 app.delete('/api/admin/soundtoks/:id', requireAdmin, async (req, res) => {
   try {
@@ -2758,7 +3019,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req: Authenticate
   try {
     const { id } = req.params;
     
-    console.log('CHECKING GENERATION ID:', id);
+    debugLog('CHECKING GENERATION ID:', id);
     
     if (!id) {
       return res.status(400).json({ error: 'Generation ID is required' });
@@ -2770,7 +3031,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req: Authenticate
     }
 
     const url = `https://api.gen-api.ru/api/v1/request/get/${id}`;
-    console.log('POLLING URL:', url);
+    debugLog('POLLING URL:', url);
 
     const response = await fetch(url, {
       method: 'GET',
@@ -2780,7 +3041,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req: Authenticate
       }
     });
 
-    console.log('POLLING RESPONSE STATUS:', response.status);
+    debugLog('POLLING RESPONSE STATUS:', response.status);
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -2789,7 +3050,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req: Authenticate
     }
 
     const data = await response.json();
-    console.log('GENERATION RESPONSE:', data);
+    debugLog('GENERATION RESPONSE keys:', data && typeof data === 'object' ? Object.keys(data) : typeof data);
 
     res.json(data);
   } catch (error) {
@@ -2802,6 +3063,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req: Authenticate
 
 // ── Billing / plans / YooKassa ─────────────────────────────────
 app.get('/api/billing/catalog', (_req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=60');
   res.json({
     plans: PLAN_CATALOG,
     tokenPacks: TOKEN_PACKS,
@@ -2874,3 +3136,18 @@ httpServer.listen(PORT, HOST, () => {
   console.log(`Server on http://${HOST}:${PORT}`);
   console.log(`WebSocket ready on ws://${HOST}:${PORT}`);
 });
+
+const shutdown = async (signal: string) => {
+  console.log(`${signal} received, shutting down…`);
+  httpServer.close(async () => {
+    try {
+      await prisma.$disconnect();
+    } finally {
+      process.exit(0);
+    }
+  });
+  setTimeout(() => process.exit(1), 10_000).unref();
+};
+
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));

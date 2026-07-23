@@ -1,4 +1,5 @@
-import { PrismaClient, PlanTier, PaymentKind, PaymentStatus } from '@prisma/client';
+import { PlanTier, PaymentKind, PaymentStatus } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import {
   PLAN_CATALOG,
   TOKEN_PACKS,
@@ -7,7 +8,6 @@ import {
   type PlanId,
 } from '../config/plans';
 
-const prisma = new PrismaClient();
 
 function utcDayKey(d = new Date()): string {
   return d.toISOString().slice(0, 10);

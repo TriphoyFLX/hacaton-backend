@@ -195,6 +195,8 @@ model Payment {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+  @@index([status, kind])
+  @@index([status, createdAt])
   @@map("payments")
 }
 
@@ -247,6 +249,9 @@ model Post {
   comments      PostComment[]
   viewers       PostView[]
 
+  @@index([authorId, createdAt])
+  @@index([createdAt])
+  @@index([likes, commentsCount, createdAt])
   @@map("posts")
 }
 
@@ -302,6 +307,7 @@ model Media {
 
   post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
 
+  @@index([postId])
   @@map("media")
 }
 
@@ -320,6 +326,8 @@ model SoundTok {
   likesList   Like[]
   sharedMessages Message[]
 
+  @@index([authorId, createdAt])
+  @@index([createdAt])
   @@map("sound_toks")
 }
 
@@ -333,6 +341,7 @@ model Comment {
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   soundTok  SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
 
+  @@index([soundTokId, createdAt])
   @@map("comments")
 }
 
@@ -346,6 +355,7 @@ model Like {
   soundTok  SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
 
   @@unique([userId, soundTokId])
+  @@index([soundTokId])
   @@map("likes")
 }
 

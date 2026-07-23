@@ -1,9 +1,9 @@
 import crypto from 'crypto';
-import { PrismaClient, PaymentKind } from '@prisma/client';
+import { PaymentKind } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import { productForKind, type PaymentProductKind } from '../config/plans';
 import { fulfillPayment, markPaymentCanceled } from './planService';
 
-const prisma = new PrismaClient();
 
 function shopId() {
   return process.env.YOOKASSA_SHOP_ID || '';

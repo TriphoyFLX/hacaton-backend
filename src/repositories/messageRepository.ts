@@ -1,7 +1,7 @@
-import { PrismaClient, Message, MessageStatus, Prisma } from '@prisma/client';
+import { Message, MessageStatus, Prisma } from '@prisma/client';
+import { prisma } from '../lib/prisma';
 import { MessageWithSender } from '../types';
 
-const prisma = new PrismaClient();
 
 const ALLOWED_REACTION_EMOJIS = ['❤️', '👍', '😂', '🔥', '😮', '😢'] as const;
 
