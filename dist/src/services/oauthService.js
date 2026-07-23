@@ -12,9 +12,8 @@ exports.vkAuthUrl = vkAuthUrl;
 exports.exchangeVkCode = exchangeVkCode;
 exports.findOrCreateOAuthUser = findOrCreateOAuthUser;
 const crypto_1 = __importDefault(require("crypto"));
-const client_1 = require("@prisma/client");
+const prisma_1 = require("../lib/prisma");
 const emailService_1 = require("./emailService");
-const prisma = new client_1.PrismaClient();
 function frontendUrl() {
     return (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
 }
@@ -137,7 +136,7 @@ function slugifyUsername(base) {
 }
 async function findOrCreateOAuthUser(input) {
     const email = input.email.toLowerCase();
-    let user = await prisma.user.findFirst({
+    let user = await prisma_1.prisma.user.findFirst({
         where: {
             OR: [
                 { email },
@@ -147,7 +146,7 @@ async function findOrCreateOAuthUser(input) {
         },
     });
     if (user) {
-        user = await prisma.user.update({
+        user = await prisma_1.prisma.user.update({
             where: { id: user.id },
             data: {
                 emailVerified: true,
@@ -162,13 +161,13 @@ async function findOrCreateOAuthUser(input) {
     const base = slugifyUsername(input.name || email.split('@')[0]);
     let username = base;
     let attempt = 0;
-    while (await prisma.user.findUnique({ where: { username } })) {
+    while (await prisma_1.prisma.user.findUnique({ where: { username } })) {
         attempt += 1;
         username = `${base}${attempt}`.slice(0, 30);
     }
     const birthDate = new Date();
     birthDate.setFullYear(birthDate.getFullYear() - 18);
-    user = await prisma.user.create({
+    user = await prisma_1.prisma.user.create({
         data: {
             email,
             username,

@@ -2,12 +2,14 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.chatService = exports.ChatService = void 0;
 const client_1 = require("@prisma/client");
+const prisma_1 = require("../lib/prisma");
 const messageRepository_1 = require("../repositories/messageRepository");
 const chatRepository_1 = require("../repositories/chatRepository");
 const userRepository_1 = require("../repositories/userRepository");
 const blockRepository_1 = require("../repositories/blockRepository");
 const messageValidation_1 = require("../utils/messageValidation");
-const prisma = new client_1.PrismaClient();
+const MAX_GROUP_MEMBERS = 100;
+const MAX_GROUP_NAME_LENGTH = 120;
 class ChatService {
     async sendMessage(data) {
         try {
@@ -23,7 +25,7 @@ class ChatService {
             }
             let soundTokId = null;
             if (data.soundTokId) {
-                const soundTok = await prisma.soundTok.findUnique({
+                const soundTok = await prisma_1.prisma.soundTok.findUnique({
                     where: { id: data.soundTokId },
                     select: { id: true },
                 });
@@ -112,12 +114,15 @@ class ChatService {
     }
     async createGroup(creatorId, name, memberIds) {
         const trimmedName = name?.trim();
-        if (!trimmedName || trimmedName.length < 2) {
-            return { success: false, error: 'Название группы должно быть минимум 2 символа' };
+        if (!trimmedName || trimmedName.length < 2 || trimmedName.length > MAX_GROUP_NAME_LENGTH) {
+            return { success: false, error: `Название группы должно быть от 2 до ${MAX_GROUP_NAME_LENGTH} символов` };
         }
-        const uniqueMembers = [...new Set(memberIds.filter((id) => id !== creatorId))];
+        const uniqueMembers = [...new Set(memberIds.filter((id) => typeof id === 'string' && id !== creatorId))];
         if (uniqueMembers.length < 1) {
             return { success: false, error: 'Добавьте хотя бы одного участника' };
+        }
+        if (uniqueMembers.length > MAX_GROUP_MEMBERS - 1) {
+            return { success: false, error: `В группе может быть не больше ${MAX_GROUP_MEMBERS} участников` };
         }
         for (const memberId of uniqueMembers) {
             const user = await userRepository_1.userRepository.getUserById(memberId);
@@ -141,6 +146,9 @@ class ChatService {
         return { success: true, pinnedAt };
     }
     async markMessagesAsRead(messageIds, userId, chatId) {
+        if (messageIds.length === 0 || messageIds.length > 100) {
+            return { count: 0, updatedIds: [] };
+        }
         const isMember = await chatRepository_1.chatRepository.isChatMember(chatId, userId);
         if (!isMember) {
             return { count: 0, updatedIds: [] };
@@ -161,6 +169,29 @@ class ChatService {
         const messages = await messageRepository_1.messageRepository.markAsDelivered(chatId, userId);
         return messages.map((m) => m.id);
     }
+    async deleteMessage(chatId, messageId, userId) {
+        const isMember = await chatRepository_1.chatRepository.isChatMember(chatId, userId);
+        if (!isMember)
+            return { success: false, error: 'Access denied' };
+        const message = await messageRepository_1.messageRepository.softDeleteMessage(messageId, userId, chatId);
+        if (!message)
+            return { success: false, error: 'Message not found' };
+        return { success: true, message };
+    }
+    async toggleReaction(chatId, messageId, userId, emoji) {
+        const isMember = await chatRepository_1.chatRepository.isChatMember(chatId, userId);
+        if (!isMember)
+            return { success: false, error: 'Access denied' };
+        const result = await messageRepository_1.messageRepository.toggleReaction({
+            messageId,
+            chatId,
+            userId,
+            emoji,
+        });
+        if (!result)
+            return { success: false, error: 'Invalid reaction' };
+        return { success: true, ...result };
+    }
     async getUnreadCounts(userId, chatIds) {
         const counts = new Map();
         await Promise.all(chatIds.map(async (chatId) => {
@@ -170,10 +201,7 @@ class ChatService {
         return counts;
     }
     async validateMessageIds(messageIds, chatId, userId) {
-        const messages = await messageRepository_1.messageRepository.getMessagesByChatId(chatId);
-        const validIds = new Set(messages
-            .filter((m) => m.receiverId === userId && messageIds.includes(m.id))
-            .map((m) => m.id));
+        const validIds = new Set(await messageRepository_1.messageRepository.getReadableMessageIds(messageIds, chatId, userId));
         return messageIds.filter((id) => validIds.has(id));
     }
 }

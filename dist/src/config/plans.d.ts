@@ -1,5 +1,6 @@
 export type PlanId = 'FREE' | 'PRO' | 'PLATINUM';
 export declare const TOKENS_PER_GENERATION = 100;
+export declare const GENERATION_COST_RUB = 17;
 export declare const PLAN_CATALOG: {
     readonly FREE: {
         readonly id: "FREE";
@@ -14,7 +15,7 @@ export declare const PLAN_CATALOG: {
     readonly PRO: {
         readonly id: "PRO";
         readonly name: "Pro";
-        readonly priceRub: 299;
+        readonly priceRub: 249;
         readonly maxCloudProjects: 30;
         readonly maxCloudSavesPerDay: number | null;
         readonly monthlyTokens: 300;
@@ -24,7 +25,7 @@ export declare const PLAN_CATALOG: {
     readonly PLATINUM: {
         readonly id: "PLATINUM";
         readonly name: "Platinum";
-        readonly priceRub: 699;
+        readonly priceRub: 499;
         readonly maxCloudProjects: number | null;
         readonly maxCloudSavesPerDay: 20;
         readonly monthlyTokens: 700;
@@ -39,21 +40,55 @@ export declare const TOKEN_PACKS: {
         readonly tokens: 400;
         readonly priceRub: 199;
         readonly generations: 4;
-        readonly description: "400 токенов ≈ 4 AI-генерации. Можно купить в любой момент.";
+        readonly description: "Старт: 4 генерации. Базовая цена за токен.";
+        readonly badge: string | null;
+    };
+    readonly TOKENS_800: {
+        readonly id: "TOKENS_800";
+        readonly name: "Пакет 800 токенов";
+        readonly tokens: 800;
+        readonly priceRub: 359;
+        readonly generations: 8;
+        readonly description: "Выгоднее старта: −10% к цене за генерацию.";
+        readonly badge: "−10%";
+    };
+    readonly TOKENS_1200: {
+        readonly id: "TOKENS_1200";
+        readonly name: "Пакет 1200 токенов";
+        readonly tokens: 1200;
+        readonly priceRub: 499;
+        readonly generations: 12;
+        readonly description: "Популярный объём: −16% к цене за генерацию.";
+        readonly badge: "−16%";
+    };
+    readonly TOKENS_2400: {
+        readonly id: "TOKENS_2400";
+        readonly name: "Пакет 2400 токенов";
+        readonly tokens: 2400;
+        readonly priceRub: 899;
+        readonly generations: 24;
+        readonly description: "Максимум выгоды: −25% к цене за генерацию.";
+        readonly badge: "−25%";
     };
 };
-export type PaymentProductKind = 'PLAN_PRO' | 'PLAN_PLATINUM' | 'TOKENS_400';
+export type TokenPackId = keyof typeof TOKEN_PACKS;
+export type PaymentProductKind = 'PLAN_PRO' | 'PLAN_PLATINUM' | TokenPackId;
+export declare function baseGenerationPriceRub(): number;
+export declare function packCompareAtRub(pack: (typeof TOKEN_PACKS)[TokenPackId]): number;
+export declare function packSaveRub(pack: (typeof TOKEN_PACKS)[TokenPackId]): number;
+export declare function packSavePercent(pack: (typeof TOKEN_PACKS)[TokenPackId]): number;
+export declare function isTokenPackKind(kind: string): kind is TokenPackId;
 export declare function productForKind(kind: PaymentProductKind): {
     kind: "PLAN_PRO";
-    amountRub: 299;
+    amountRub: 249;
     description: string;
 } | {
     kind: "PLAN_PLATINUM";
-    amountRub: 699;
+    amountRub: 499;
     description: string;
 } | {
-    kind: "TOKENS_400";
-    amountRub: 199;
+    kind: "TOKENS_400" | "TOKENS_800" | "TOKENS_1200" | "TOKENS_2400";
+    amountRub: 899 | 499 | 199 | 359;
     description: string;
 };
 //# sourceMappingURL=plans.d.ts.map

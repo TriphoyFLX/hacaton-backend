@@ -9,6 +9,10 @@ export interface UserProfile {
     role: string;
     createdAt: Date;
     updatedAt: Date;
+    battleElo?: number;
+    battleWins?: number;
+    battleLosses?: number;
+    battleDraws?: number;
 }
 export interface UpdateUserData {
     displayName?: string;

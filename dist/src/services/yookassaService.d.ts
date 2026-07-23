@@ -8,7 +8,7 @@ export declare function createYooKassaPayment(opts: {
     paymentId: string;
     yookassaPaymentId: string;
     confirmationUrl: string | null;
-    amountRub: 299 | 699 | 199;
+    amountRub: 899 | 249 | 499 | 199 | 359;
     kind: PaymentProductKind;
 }>;
 export declare function handleYooKassaWebhook(notification: any): Promise<void>;
@@ -16,13 +16,13 @@ export declare function syncPaymentStatus(userId: string, paymentId: string): Pr
     id: string;
     createdAt: Date;
     updatedAt: Date;
+    status: import(".prisma/client").$Enums.PaymentStatus;
+    description: string;
     userId: string;
     yookassaPaymentId: string | null;
     kind: import(".prisma/client").$Enums.PaymentKind;
-    status: import(".prisma/client").$Enums.PaymentStatus;
     amountRub: number;
     confirmationUrl: string | null;
-    description: string;
     metadata: import("@prisma/client/runtime/library").JsonValue | null;
 }>;
 //# sourceMappingURL=yookassaService.d.ts.map

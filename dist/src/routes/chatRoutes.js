@@ -13,6 +13,8 @@ function createChatRouter(authenticateToken) {
     router.post('/', authenticateToken, chatController_1.createChat);
     router.patch('/:chatId/pin', authenticateToken, chatController_1.pinChat);
     router.post('/:chatId/messages', authenticateToken, chatController_1.sendMessage);
+    router.delete('/:chatId/messages/:messageId', authenticateToken, chatController_1.deleteMessage);
+    router.post('/:chatId/messages/:messageId/reactions', authenticateToken, chatController_1.toggleMessageReaction);
     router.post('/:chatId/read', authenticateToken, chatController_1.markAsRead);
     return router;
 }

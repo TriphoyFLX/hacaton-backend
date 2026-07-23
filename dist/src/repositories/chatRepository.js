@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.chatRepository = exports.ChatRepository = void 0;
 const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+const prisma_1 = require("../lib/prisma");
 const chatUserInclude = {
     include: {
         user: {
@@ -18,6 +18,7 @@ const chatUserInclude = {
 const chatListInclude = {
     users: chatUserInclude,
     messages: {
+        where: { deletedAt: null },
         orderBy: { createdAt: 'desc' },
         take: 1,
         include: {
@@ -74,7 +75,7 @@ function scoreDirectChat(chat, userId) {
 class ChatRepository {
     async getChatsByUserId(userId) {
         await this.mergeAllDuplicateDirectChatsForUser(userId);
-        const chats = await prisma.chat.findMany({
+        const chats = await prisma_1.prisma.chat.findMany({
             where: {
                 users: { some: { userId } },
             },
@@ -106,7 +107,7 @@ class ChatRepository {
         });
     }
     async getChatById(chatId) {
-        const chat = await prisma.chat.findUnique({
+        const chat = await prisma_1.prisma.chat.findUnique({
             where: { id: chatId },
             include: {
                 users: chatUserInclude,
@@ -115,19 +116,31 @@ class ChatRepository {
         return chat;
     }
     async getChatMeta(chatId) {
-        return prisma.chat.findUnique({
+        return prisma_1.prisma.chat.findUnique({
             where: { id: chatId },
             select: { id: true, type: true, name: true, creatorId: true },
         });
     }
     async isChatMember(chatId, userId) {
-        const chatUser = await prisma.chatUser.findFirst({
+        const chatUser = await prisma_1.prisma.chatUser.findFirst({
             where: { chatId, userId },
         });
         return !!chatUser;
     }
+    async usersShareChat(userId, otherUserId) {
+        const chat = await prisma_1.prisma.chat.findFirst({
+            where: {
+                AND: [
+                    { users: { some: { userId } } },
+                    { users: { some: { userId: otherUserId } } },
+                ],
+            },
+            select: { id: true },
+        });
+        return !!chat;
+    }
     async findDirectChatsBetween(userId1, userId2) {
-        const chats = await prisma.chat.findMany({
+        const chats = await prisma_1.prisma.chat.findMany({
             where: {
                 type: client_1.ChatType.DIRECT,
                 AND: [
@@ -150,7 +163,7 @@ class ChatRepository {
         const primary = sorted[0];
         const extras = sorted.slice(1);
         for (const extra of extras) {
-            await prisma.$transaction(async (tx) => {
+            await prisma_1.prisma.$transaction(async (tx) => {
                 const messages = await tx.message.findMany({
                     where: { chatId: extra.id },
                     select: { id: true, clientMessageId: true },
@@ -189,18 +202,18 @@ class ChatRepository {
                 await tx.chat.delete({ where: { id: extra.id } });
             });
         }
-        await prisma.chat.update({
+        await prisma_1.prisma.chat.update({
             where: { id: primary.id },
             data: { updatedAt: new Date() },
         });
-        const refreshed = await prisma.chat.findUnique({
+        const refreshed = await prisma_1.prisma.chat.findUnique({
             where: { id: primary.id },
             include: chatListInclude,
         });
         return refreshed;
     }
     async mergeAllDuplicateDirectChatsForUser(userId) {
-        const chats = await prisma.chat.findMany({
+        const chats = await prisma_1.prisma.chat.findMany({
             where: {
                 type: client_1.ChatType.DIRECT,
                 users: { some: { userId } },
@@ -231,7 +244,7 @@ class ChatRepository {
             return this.mergeDirectChatDuplicates(existing, userId1);
         }
         try {
-            const chat = await prisma.chat.create({
+            const chat = await prisma_1.prisma.chat.create({
                 data: {
                     type: client_1.ChatType.DIRECT,
                     users: {
@@ -254,7 +267,7 @@ class ChatRepository {
     }
     async createGroupChat(creatorId, name, memberIds) {
         const uniqueMembers = [...new Set([creatorId, ...memberIds])];
-        const chat = await prisma.chat.create({
+        const chat = await prisma_1.prisma.chat.create({
             data: {
                 type: client_1.ChatType.GROUP,
                 name: name.trim(),
@@ -270,7 +283,7 @@ class ChatRepository {
         return chat;
     }
     async setChatPinned(chatId, userId, pinned) {
-        const updated = await prisma.chatUser.update({
+        const updated = await prisma_1.prisma.chatUser.update({
             where: {
                 userId_chatId: { userId, chatId },
             },
@@ -284,7 +297,7 @@ class ChatRepository {
         return updated.pinnedAt;
     }
     async updateLastReadAt(chatId, userId) {
-        await prisma.chatUser.update({
+        await prisma_1.prisma.chatUser.update({
             where: {
                 userId_chatId: { userId, chatId },
             },
@@ -294,20 +307,20 @@ class ChatRepository {
         });
     }
     async updateTimestamp(chatId) {
-        await prisma.chat.update({
+        await prisma_1.prisma.chat.update({
             where: { id: chatId },
             data: { updatedAt: new Date() },
         });
     }
     async getChatParticipants(chatId) {
-        const chatUsers = await prisma.chatUser.findMany({
+        const chatUsers = await prisma_1.prisma.chatUser.findMany({
             where: { chatId },
             select: { userId: true },
         });
         return chatUsers.map((cu) => cu.userId);
     }
     async getOtherParticipant(chatId, userId) {
-        const otherUser = await prisma.chatUser.findFirst({
+        const otherUser = await prisma_1.prisma.chatUser.findFirst({
             where: {
                 chatId,
                 userId: { not: userId },

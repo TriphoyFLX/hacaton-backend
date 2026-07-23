@@ -171,9 +171,12 @@ export async function consumeAiGenerationTokens(userId: string): Promise<number>
   return updated.tokenBalance;
 }
 
-export async function fulfillPayment(paymentId: string): Promise<void> {
+/** @returns true if payment was newly marked SUCCEEDED (idempotent). */
+export async function fulfillPayment(paymentId: string): Promise<boolean> {
   const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
-  if (!payment || payment.status === 'SUCCEEDED') return;
+  if (!payment || payment.status === 'SUCCEEDED') return false;
+
+  let fulfilled = false;
 
   await prisma.$transaction(async (tx) => {
     const locked = await tx.payment.findUnique({ where: { id: paymentId } });
@@ -183,6 +186,7 @@ export async function fulfillPayment(paymentId: string): Promise<void> {
       where: { id: paymentId },
       data: { status: 'SUCCEEDED' },
     });
+    fulfilled = true;
 
     if (isTokenPackKind(locked.kind)) {
       await tx.user.update({
@@ -214,6 +218,28 @@ export async function fulfillPayment(paymentId: string): Promise<void> {
       },
     });
   });
+
+  if (fulfilled) {
+    const full = await prisma.payment.findUnique({
+      where: { id: paymentId },
+      include: { user: { select: { username: true, email: true } } },
+    });
+    if (full) {
+      const { sendAdminNotification } = await import('./emailService');
+      void sendAdminNotification(
+        'Оплата прошла',
+        [
+          `User: @${full.user.username} (${full.user.email})`,
+          `Kind: ${full.kind}`,
+          `Amount: ${full.amountRub} ₽`,
+          `Payment: ${full.id}`,
+          `YooKassa: ${full.yookassaPaymentId || '—'}`,
+        ].join('\n'),
+      );
+    }
+  }
+
+  return fulfilled;
 }
 
 export async function markPaymentCanceled(paymentId: string): Promise<void> {

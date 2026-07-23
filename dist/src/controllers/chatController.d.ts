@@ -7,6 +7,8 @@ export declare function createChat(req: AuthenticatedRequest, res: Response): Pr
 export declare function createGroup(req: AuthenticatedRequest, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
 export declare function pinChat(req: AuthenticatedRequest, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
 export declare function sendMessage(req: AuthenticatedRequest, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+export declare function deleteMessage(req: AuthenticatedRequest, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+export declare function toggleMessageReaction(req: AuthenticatedRequest, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
 export declare function markAsRead(req: AuthenticatedRequest, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
 export declare function getAvailableUsers(req: AuthenticatedRequest, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
 //# sourceMappingURL=chatController.d.ts.map

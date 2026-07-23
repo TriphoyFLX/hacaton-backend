@@ -1,11 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.blockRepository = exports.BlockRepository = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+const prisma_1 = require("../lib/prisma");
 class BlockRepository {
     async blockUser(blockerId, blockedId) {
-        return prisma.block.upsert({
+        return prisma_1.prisma.block.upsert({
             where: {
                 blockerId_blockedId: { blockerId, blockedId },
             },
@@ -14,12 +13,12 @@ class BlockRepository {
         });
     }
     async unblockUser(blockerId, blockedId) {
-        return prisma.block.deleteMany({
+        return prisma_1.prisma.block.deleteMany({
             where: { blockerId, blockedId },
         });
     }
     async isBlockedBy(blockerId, blockedId) {
-        const block = await prisma.block.findUnique({
+        const block = await prisma_1.prisma.block.findUnique({
             where: {
                 blockerId_blockedId: { blockerId, blockedId },
             },
@@ -27,7 +26,7 @@ class BlockRepository {
         return !!block;
     }
     async isEitherBlocked(userId1, userId2) {
-        const block = await prisma.block.findFirst({
+        const block = await prisma_1.prisma.block.findFirst({
             where: {
                 OR: [
                     { blockerId: userId1, blockedId: userId2 },
@@ -38,7 +37,7 @@ class BlockRepository {
         return !!block;
     }
     async getBlockedUserIds(userId) {
-        const blocks = await prisma.block.findMany({
+        const blocks = await prisma_1.prisma.block.findMany({
             where: { blockerId: userId },
             select: { blockedId: true },
         });

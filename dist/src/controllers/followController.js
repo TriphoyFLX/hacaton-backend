@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.createFollowHandlers = createFollowHandlers;
 const followService_1 = require("../services/followService");
 const userRepository_1 = require("../repositories/userRepository");
+const notificationService_1 = require("../services/notificationService");
 function createFollowHandlers() {
     async function followUser(req, res) {
         try {
@@ -13,6 +14,15 @@ function createFollowHandlers() {
             const result = await followService_1.followService.follow(req.user.id, userId);
             if (!result.success) {
                 return res.status(400).json({ error: result.error });
+            }
+            if (result.created) {
+                void notificationService_1.notificationService.create({
+                    userId,
+                    actorId: req.user.id,
+                    type: 'FOLLOW',
+                    entityType: 'user',
+                    entityId: req.user.id,
+                }).catch((error) => console.error('Failed to create follow notification:', error));
             }
             res.json(result);
         }

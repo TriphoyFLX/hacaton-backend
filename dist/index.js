@@ -7,33 +7,48 @@ const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const client_1 = require("@prisma/client");
 const dotenv_1 = __importDefault(require("dotenv"));
 const multer_1 = __importDefault(require("multer"));
 const path_1 = __importDefault(require("path"));
 const fs_1 = __importDefault(require("fs"));
+const zod_1 = require("zod");
 const http_1 = require("http");
 const profileRoutes_1 = require("./src/routes/profileRoutes");
 const followRoutes_1 = require("./src/routes/followRoutes");
+const presetRoutes_1 = require("./src/routes/presetRoutes");
 const emailService_1 = require("./src/services/emailService");
 const planService_1 = require("./src/services/planService");
 const yookassaService_1 = require("./src/services/yookassaService");
 const plans_1 = require("./src/config/plans");
+const battleEloService_1 = require("./src/services/battleEloService");
+const battleRating_1 = require("./src/services/battleRating");
 const oauthService_1 = require("./src/services/oauthService");
 const chatRoutes_1 = require("./src/routes/chatRoutes");
 const blockRoutes_1 = require("./src/routes/blockRoutes");
 const socketServer_1 = require("./src/websocket/socketServer");
+const notificationService_1 = require("./src/services/notificationService");
 const rateLimiter_1 = require("./src/utils/rateLimiter");
 const security_1 = require("./src/middleware/security");
+const compression_1 = require("./src/middleware/compression");
+const messageValidation_1 = require("./src/utils/messageValidation");
+const prisma_1 = require("./src/lib/prisma");
 dotenv_1.default.config();
 const JWT_SECRET = (0, security_1.requireJwtSecret)();
 const app = (0, express_1.default)();
-const prisma = new client_1.PrismaClient();
+const isProd = process.env.NODE_ENV === 'production';
+const debugLog = (...args) => {
+    if (!isProd)
+        console.log(...args);
+};
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 const uploadsDir = path_1.default.join(__dirname, 'uploads');
 if (!fs_1.default.existsSync(uploadsDir)) {
     fs_1.default.mkdirSync(uploadsDir, { recursive: true });
+}
+const privatePresetsDir = path_1.default.join(__dirname, 'private-presets');
+if (!fs_1.default.existsSync(privatePresetsDir)) {
+    fs_1.default.mkdirSync(privatePresetsDir, { recursive: true });
 }
 const storage = multer_1.default.diskStorage({
     destination: (req, file, cb) => {
@@ -44,14 +59,15 @@ const storage = multer_1.default.diskStorage({
         cb(null, uniqueSuffix + path_1.default.extname(file.originalname));
     }
 });
+const SOUNDTOK_MAX_BYTES = 15 * 1024 * 1024;
 const upload = (0, multer_1.default)({
     storage,
     limits: {
-        fileSize: 50 * 1024 * 1024
+        fileSize: SOUNDTOK_MAX_BYTES,
     },
     fileFilter: (req, file, cb) => {
         const allowedImageTypes = /jpeg|jpg|png|gif/;
-        const allowedVideoTypes = /mp4|mov|avi/;
+        const allowedVideoTypes = /mp4|mov|avi|webm/;
         const allowedAudioTypes = /mp3|wav|mpeg|audio\/mpeg|audio\/wav|audio\/mp3/;
         const extname = file.originalname.toLowerCase();
         const mimetype = file.mimetype.toLowerCase();
@@ -97,8 +113,14 @@ const receiveMidiSample = (req, res, next) => {
 };
 app.use(security_1.securityHeaders);
 app.use((0, cors_1.default)((0, security_1.corsOptions)()));
+app.use(compression_1.compressionMiddleware);
 app.use(express_1.default.json({ limit: '5mb' }));
-app.use('/uploads', express_1.default.static(uploadsDir));
+app.use('/uploads', express_1.default.static(uploadsDir, {
+    maxAge: isProd ? '7d' : 0,
+    etag: true,
+    lastModified: true,
+    immutable: false,
+}));
 app.get('/api/health', (_req, res) => {
     res.json({ ok: true, ts: Date.now() });
 });
@@ -148,6 +170,23 @@ const userPublicSelect = {
     createdAt: true,
     updatedAt: true,
 };
+const authorPreviewSelect = {
+    id: true,
+    username: true,
+    displayName: true,
+    avatar: true,
+    role: true,
+};
+const REPORT_REASONS = [
+    'BULLYING',
+    'SCAM',
+    'SPAM',
+    'HARASSMENT',
+    'HATE',
+    'IMPERSONATION',
+    'OTHER',
+];
+const REPORT_STATUSES = ['OPEN', 'REVIEWING', 'RESOLVED', 'DISMISSED'];
 function signAuthToken(userId, role) {
     return jsonwebtoken_1.default.sign({ userId, ...(role ? { role } : {}) }, JWT_SECRET, { expiresIn: '7d' });
 }
@@ -167,7 +206,7 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
         if (password.length < 8) {
             return res.status(400).json({ error: 'Password must be at least 8 characters' });
         }
-        const existingUser = await prisma.user.findFirst({
+        const existingUser = await prisma_1.prisma.user.findFirst({
             where: {
                 OR: [
                     { email: normalizedEmail },
@@ -185,7 +224,7 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
             if (existingUser.email === normalizedEmail && !existingUser.emailVerified) {
                 const { code, expires } = (0, emailService_1.createVerificationPayload)();
                 const hashedPassword = await bcryptjs_1.default.hash(password, 12);
-                await prisma.user.update({
+                await prisma_1.prisma.user.update({
                     where: { id: existingUser.id },
                     data: {
                         username,
@@ -210,7 +249,7 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
         }
         const hashedPassword = await bcryptjs_1.default.hash(password, 12);
         const { code, expires } = (0, emailService_1.createVerificationPayload)();
-        await prisma.user.create({
+        await prisma_1.prisma.user.create({
             data: {
                 username,
                 email: normalizedEmail,
@@ -242,7 +281,7 @@ app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
         if (!email || !code) {
             return res.status(400).json({ error: 'Email and code required' });
         }
-        const user = await prisma.user.findUnique({ where: { email } });
+        const user = await prisma_1.prisma.user.findUnique({ where: { email } });
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
@@ -257,7 +296,7 @@ app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
         if (!user.emailVerificationExpires || user.emailVerificationExpires < new Date()) {
             return res.status(400).json({ error: 'Verification code expired' });
         }
-        const updated = await prisma.user.update({
+        const updated = await prisma_1.prisma.user.update({
             where: { id: user.id },
             data: {
                 emailVerified: true,
@@ -281,7 +320,7 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
         if (!email) {
             return res.status(400).json({ error: 'Email required' });
         }
-        const user = await prisma.user.findUnique({ where: { email } });
+        const user = await prisma_1.prisma.user.findUnique({ where: { email } });
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
@@ -289,7 +328,7 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
             return res.status(400).json({ error: 'Email already verified' });
         }
         const { code, expires } = (0, emailService_1.createVerificationPayload)();
-        await prisma.user.update({
+        await prisma_1.prisma.user.update({
             where: { id: user.id },
             data: {
                 emailVerificationCode: code,
@@ -311,7 +350,7 @@ app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
         if (!email || !password) {
             return res.status(400).json({ error: 'Email and password required' });
         }
-        const user = await prisma.user.findUnique({
+        const user = await prisma_1.prisma.user.findUnique({
             where: { email },
             select: {
                 ...userPublicSelect,
@@ -349,7 +388,7 @@ app.get('/api/auth/me', async (req, res) => {
         }
         const token = authHeader.split(' ')[1];
         const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        const user = await prisma.user.findUnique({
+        const user = await prisma_1.prisma.user.findUnique({
             where: { id: decoded.userId },
             select: userPublicSelect,
         });
@@ -445,7 +484,7 @@ const isAdmin = async (authHeader) => {
     const token = authHeader.replace('Bearer ', '');
     try {
         const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        const user = await prisma.user.findUnique({
+        const user = await prisma_1.prisma.user.findUnique({
             where: { id: decoded.userId },
             select: { role: true }
         });
@@ -457,16 +496,13 @@ const isAdmin = async (authHeader) => {
 };
 const authenticateToken = async (req, res, next) => {
     const authHeader = req.headers.authorization;
-    console.log(`Auth middleware - ${req.method} ${req.path} - auth header:`, authHeader ? 'present' : 'missing');
     if (!authHeader) {
-        console.log('Auth middleware: No token provided');
         return res.status(401).json({ error: 'No token provided' });
     }
-    const token = authHeader.replace('Bearer ', '');
+    const token = authHeader.replace(/^Bearer\s+/i, '');
     try {
         const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        console.log('Auth middleware: Token decoded, userId:', decoded.userId);
-        const user = await prisma.user.findUnique({
+        const user = await prisma_1.prisma.user.findUnique({
             where: { id: decoded.userId },
             select: {
                 id: true,
@@ -477,15 +513,13 @@ const authenticateToken = async (req, res, next) => {
             }
         });
         if (!user) {
-            console.log('Auth middleware: User not found for id:', decoded.userId);
             return res.status(401).json({ error: 'User not found' });
         }
-        console.log('Auth middleware: User authenticated:', user.username);
         req.user = user;
         next();
     }
     catch (error) {
-        console.log('Auth middleware: Invalid token -', error instanceof Error ? error.message : 'unknown error');
+        debugLog('Auth middleware: Invalid token -', error instanceof Error ? error.message : 'unknown error');
         return res.status(401).json({ error: 'Invalid token' });
     }
 };
@@ -496,7 +530,7 @@ const asyncRoute = (handler) => (req, res, next) => {
     void handler(req, res).catch(next);
 };
 app.get('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) => {
-    const projects = await prisma.midiProject.findMany({
+    const projects = await prisma_1.prisma.midiProject.findMany({
         where: { ownerId: req.user.id },
         select: { id: true, name: true, createdAt: true, updatedAt: true },
         orderBy: { updatedAt: 'desc' },
@@ -504,7 +538,7 @@ app.get('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) => 
     res.json(projects);
 }));
 app.get('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res) => {
-    const project = await prisma.midiProject.findFirst({
+    const project = await prisma_1.prisma.midiProject.findFirst({
         where: { id: req.params.id, ownerId: req.user.id },
     });
     if (!project)
@@ -512,7 +546,7 @@ app.get('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res)
     res.json(project);
 }));
 app.post('/api/midi-projects/:id/samples', authenticateToken, receiveMidiSample, asyncRoute(async (req, res) => {
-    const project = await prisma.midiProject.findFirst({
+    const project = await prisma_1.prisma.midiProject.findFirst({
         where: { id: req.params.id, ownerId: req.user.id },
         select: { id: true },
     });
@@ -525,7 +559,7 @@ app.post('/api/midi-projects/:id/samples', authenticateToken, receiveMidiSample,
         ? req.body.sampleId
         : undefined;
     if (requestedId) {
-        const existing = await prisma.midiSample.findUnique({
+        const existing = await prisma_1.prisma.midiSample.findUnique({
             where: { id: requestedId },
             select: { id: true, ownerId: true, projectId: true, name: true, mimeType: true, size: true, createdAt: true },
         });
@@ -537,7 +571,7 @@ app.post('/api/midi-projects/:id/samples', authenticateToken, receiveMidiSample,
             return res.json(metadata);
         }
     }
-    const sample = await prisma.midiSample.create({
+    const sample = await prisma_1.prisma.midiSample.create({
         data: {
             ...(requestedId ? { id: requestedId } : {}),
             name: req.file.originalname.slice(0, 255),
@@ -552,7 +586,7 @@ app.post('/api/midi-projects/:id/samples', authenticateToken, receiveMidiSample,
     res.status(201).json(sample);
 }));
 app.get('/api/midi-samples/:id', authenticateToken, asyncRoute(async (req, res) => {
-    const sample = await prisma.midiSample.findFirst({
+    const sample = await prisma_1.prisma.midiSample.findFirst({
         where: { id: req.params.id, ownerId: req.user.id },
         select: { data: true, mimeType: true, size: true },
     });
@@ -576,7 +610,7 @@ app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) =>
     catch (e) {
         return res.status(e.status || 402).json({ error: e.message, code: e.code });
     }
-    const project = await prisma.midiProject.create({
+    const project = await prisma_1.prisma.midiProject.create({
         data: {
             name,
             data: body.data,
@@ -587,7 +621,7 @@ app.post('/api/midi-projects', authenticateToken, asyncRoute(async (req, res) =>
     res.status(201).json(project);
 }));
 app.put('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res) => {
-    const existing = await prisma.midiProject.findFirst({
+    const existing = await prisma_1.prisma.midiProject.findFirst({
         where: { id: req.params.id, ownerId: req.user.id },
         select: { id: true },
     });
@@ -602,7 +636,7 @@ app.put('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res)
     if (body.data !== undefined && !hasData) {
         return res.status(400).json({ error: 'Invalid project data' });
     }
-    const project = await prisma.midiProject.update({
+    const project = await prisma_1.prisma.midiProject.update({
         where: { id: existing.id },
         data: {
             name,
@@ -612,7 +646,7 @@ app.put('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res)
     res.json(project);
 }));
 app.delete('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res) => {
-    const result = await prisma.midiProject.deleteMany({
+    const result = await prisma_1.prisma.midiProject.deleteMany({
         where: { id: req.params.id, ownerId: req.user.id },
     });
     if (result.count === 0)
@@ -627,7 +661,7 @@ const requireAdmin = async (req, res, next) => {
     const token = authHeader.replace(/^Bearer\s+/i, '');
     try {
         const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
-        const user = await prisma.user.findUnique({
+        const user = await prisma_1.prisma.user.findUnique({
             where: { id: decoded.userId },
             select: {
                 id: true,
@@ -664,6 +698,30 @@ app.use('/api/profile', (0, profileRoutes_1.createProfileRouter)(authenticateTok
 app.use('/api/follows', (0, followRoutes_1.createFollowRouter)(authenticateToken));
 app.use('/api/chats', (0, chatRoutes_1.createChatRouter)(authenticateToken));
 app.use('/api/blocks', (0, blockRoutes_1.createBlockRouter)(authenticateToken));
+app.use('/api/presets', (0, presetRoutes_1.createPresetRouter)(prisma_1.prisma, authenticateToken, uploadsDir, privatePresetsDir));
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+    try {
+        const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+        res.json(await notificationService_1.notificationService.list(req.user.id, limit));
+    }
+    catch (error) {
+        console.error('Failed to fetch notifications:', error);
+        res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+});
+app.patch('/api/notifications/read', authenticateToken, async (req, res) => {
+    try {
+        const ids = Array.isArray(req.body?.ids) && req.body.ids.every((id) => typeof id === 'string')
+            ? req.body.ids
+            : undefined;
+        const unreadCount = await notificationService_1.notificationService.markRead(req.user.id, ids);
+        res.json({ unreadCount });
+    }
+    catch (error) {
+        console.error('Failed to mark notifications as read:', error);
+        res.status(500).json({ error: 'Failed to update notifications' });
+    }
+});
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
     try {
         const userId = getUserFromToken(req.headers.authorization);
@@ -689,7 +747,7 @@ app.post('/api/posts', upload.array('media', 10), async (req, res) => {
             type: getMediaType(file.filename),
             url: `/uploads/${file.filename}`
         }));
-        const post = await prisma.post.create({
+        const post = await prisma_1.prisma.post.create({
             data: {
                 content,
                 authorId: userId,
@@ -702,7 +760,9 @@ app.post('/api/posts', upload.array('media', 10), async (req, res) => {
                 author: {
                     select: {
                         id: true,
-                        username: true
+                        username: true,
+                        displayName: true,
+                        avatar: true,
                     }
                 }
             }
@@ -716,34 +776,292 @@ app.post('/api/posts', upload.array('media', 10), async (req, res) => {
 });
 app.get('/api/posts', async (req, res) => {
     try {
-        const posts = await prisma.post.findMany({
-            include: {
-                media: true,
-                author: {
-                    select: {
-                        id: true,
-                        username: true
-                    }
-                }
-            },
-            orderBy: {
-                createdAt: 'desc'
+        const userId = getUserFromToken(req.headers.authorization);
+        const sort = req.query.sort === 'trending' ? 'trending' : 'latest';
+        const rawTag = typeof req.query.tag === 'string' ? req.query.tag : '';
+        const tag = rawTag.replace(/^#/, '').trim().slice(0, 64);
+        const take = Math.min(100, Math.max(1, Number(req.query.limit) || 30));
+        const skip = Math.max(0, Number(req.query.offset) || 0);
+        const where = tag
+            ? {
+                content: {
+                    contains: `#${tag}`,
+                    mode: 'insensitive',
+                },
             }
+            : undefined;
+        const [posts, total] = await Promise.all([
+            prisma_1.prisma.post.findMany({
+                where,
+                select: {
+                    id: true,
+                    content: true,
+                    authorId: true,
+                    likes: true,
+                    commentsCount: true,
+                    views: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    media: { select: { id: true, type: true, url: true, createdAt: true } },
+                    author: { select: authorPreviewSelect },
+                    likesList: userId
+                        ? {
+                            where: { userId },
+                            select: { id: true },
+                        }
+                        : false,
+                },
+                orderBy: sort === 'trending'
+                    ? [{ likes: 'desc' }, { commentsCount: 'desc' }, { createdAt: 'desc' }]
+                    : { createdAt: 'desc' },
+                take,
+                skip,
+            }),
+            prisma_1.prisma.post.count({ where }),
+        ]);
+        const items = posts.map((post) => ({
+            ...post,
+            isLiked: userId ? Boolean(post.likesList && post.likesList.length > 0) : false,
+            likesList: undefined,
+        }));
+        res.json({
+            items,
+            total,
+            limit: take,
+            offset: skip,
+            hasMore: skip + items.length < total,
         });
-        res.json(posts);
     }
     catch (error) {
         console.error(error);
         res.status(500).json({ error: 'Failed to fetch posts' });
     }
 });
-app.post('/api/soundtok', upload.single('video'), async (req, res) => {
+app.get('/api/posts/:id', async (req, res) => {
     try {
-        console.log('SoundTok upload - headers:', req.headers.authorization ? 'Auth header present' : 'No auth header');
-        console.log('SoundTok upload - body:', req.body);
-        console.log('SoundTok upload - file:', req.file);
         const userId = getUserFromToken(req.headers.authorization);
-        console.log('SoundTok upload - userId:', userId);
+        const post = await prisma_1.prisma.post.findUnique({
+            where: { id: req.params.id },
+            include: {
+                media: true,
+                author: { select: authorPreviewSelect },
+                likesList: userId ? { where: { userId }, select: { id: true } } : false,
+            },
+        });
+        if (!post)
+            return res.status(404).json({ error: 'Post not found' });
+        res.json({ ...post, isLiked: userId ? post.likesList.length > 0 : false, likesList: undefined });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to fetch post' });
+    }
+});
+app.post('/api/posts/:id/like', async (req, res) => {
+    try {
+        const userId = getUserFromToken(req.headers.authorization);
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const post = await prisma_1.prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true, authorId: true } });
+        if (!post)
+            return res.status(404).json({ error: 'Post not found' });
+        const existing = await prisma_1.prisma.postLike.findUnique({ where: { userId_postId: { userId, postId: post.id } } });
+        if (existing)
+            return res.status(400).json({ error: 'Already liked' });
+        await prisma_1.prisma.$transaction([
+            prisma_1.prisma.postLike.create({ data: { userId, postId: post.id } }),
+            prisma_1.prisma.post.update({ where: { id: post.id }, data: { likes: { increment: 1 } } }),
+        ]);
+        const updated = await prisma_1.prisma.post.findUnique({ where: { id: post.id }, select: { likes: true } });
+        void notificationService_1.notificationService.create({
+            userId: post.authorId,
+            actorId: userId,
+            type: 'LIKE',
+            entityType: 'post',
+            entityId: post.id,
+        }).catch((error) => console.error('Failed to create like notification:', error));
+        res.json({ id: post.id, likes: updated?.likes ?? 0, isLiked: true });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to like post' });
+    }
+});
+app.delete('/api/posts/:id/like', async (req, res) => {
+    try {
+        const userId = getUserFromToken(req.headers.authorization);
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const post = await prisma_1.prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true, authorId: true } });
+        if (!post)
+            return res.status(404).json({ error: 'Post not found' });
+        const existing = await prisma_1.prisma.postLike.findUnique({ where: { userId_postId: { userId, postId: post.id } } });
+        if (!existing)
+            return res.status(400).json({ error: 'Post is not liked' });
+        await prisma_1.prisma.$transaction([
+            prisma_1.prisma.postLike.delete({ where: { id: existing.id } }),
+            prisma_1.prisma.post.update({ where: { id: post.id }, data: { likes: { decrement: 1 } } }),
+        ]);
+        const updated = await prisma_1.prisma.post.findUnique({ where: { id: post.id }, select: { likes: true } });
+        res.json({ id: post.id, likes: Math.max(0, updated?.likes ?? 0), isLiked: false });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to unlike post' });
+    }
+});
+app.get('/api/posts/:id/comments', async (req, res) => {
+    try {
+        const comments = await prisma_1.prisma.postComment.findMany({
+            where: { postId: req.params.id },
+            include: { author: { select: authorPreviewSelect } },
+            orderBy: { createdAt: 'asc' },
+            take: 100,
+        });
+        res.json(comments);
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to fetch comments' });
+    }
+});
+app.post('/api/posts/:id/comments', async (req, res) => {
+    try {
+        const userId = getUserFromToken(req.headers.authorization);
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const validation = (0, messageValidation_1.validateMessageContent)(req.body?.text);
+        if (!validation.valid || !validation.content)
+            return res.status(400).json({ error: validation.error || 'Invalid comment' });
+        if (validation.content.length > 1000)
+            return res.status(400).json({ error: 'Comment is too long' });
+        const post = await prisma_1.prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true, authorId: true } });
+        if (!post)
+            return res.status(404).json({ error: 'Post not found' });
+        const [comment, updated] = await prisma_1.prisma.$transaction([
+            prisma_1.prisma.postComment.create({
+                data: { text: validation.content, authorId: userId, postId: post.id },
+                include: { author: { select: authorPreviewSelect } },
+            }),
+            prisma_1.prisma.post.update({ where: { id: post.id }, data: { commentsCount: { increment: 1 } }, select: { commentsCount: true } }),
+        ]);
+        void notificationService_1.notificationService.create({
+            userId: post.authorId,
+            actorId: userId,
+            type: 'COMMENT',
+            entityType: 'post',
+            entityId: post.id,
+        }).catch((error) => console.error('Failed to create comment notification:', error));
+        res.status(201).json({ comment, commentsCount: updated.commentsCount });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to create comment' });
+    }
+});
+app.delete('/api/posts/:id', async (req, res) => {
+    try {
+        const userId = getUserFromToken(req.headers.authorization);
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const post = await prisma_1.prisma.post.findUnique({
+            where: { id: req.params.id },
+            select: { id: true, authorId: true },
+        });
+        if (!post)
+            return res.status(404).json({ error: 'Post not found' });
+        if (post.authorId !== userId)
+            return res.status(403).json({ error: 'Access denied' });
+        await prisma_1.prisma.post.delete({ where: { id: post.id } });
+        res.json({ success: true, id: post.id });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to delete post' });
+    }
+});
+app.delete('/api/posts/:postId/comments/:commentId', async (req, res) => {
+    try {
+        const userId = getUserFromToken(req.headers.authorization);
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const comment = await prisma_1.prisma.postComment.findFirst({
+            where: { id: req.params.commentId, postId: req.params.postId },
+            select: { id: true, authorId: true, postId: true },
+        });
+        if (!comment)
+            return res.status(404).json({ error: 'Comment not found' });
+        if (comment.authorId !== userId)
+            return res.status(403).json({ error: 'Access denied' });
+        const [, updated] = await prisma_1.prisma.$transaction([
+            prisma_1.prisma.postComment.delete({ where: { id: comment.id } }),
+            prisma_1.prisma.post.update({
+                where: { id: comment.postId },
+                data: { commentsCount: { decrement: 1 } },
+                select: { commentsCount: true },
+            }),
+        ]);
+        res.json({
+            success: true,
+            id: comment.id,
+            commentsCount: Math.max(0, updated.commentsCount),
+        });
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to delete comment' });
+    }
+});
+app.post('/api/posts/:id/view', async (req, res) => {
+    try {
+        const userId = getUserFromToken(req.headers.authorization);
+        if (!userId)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const post = await prisma_1.prisma.post.findUnique({
+            where: { id: req.params.id },
+            select: { id: true, authorId: true, views: true },
+        });
+        if (!post)
+            return res.status(404).json({ error: 'Post not found' });
+        if (post.authorId === userId)
+            return res.json({ id: post.id, views: post.views });
+        const existing = await prisma_1.prisma.postView.findUnique({
+            where: { userId_postId: { userId, postId: post.id } },
+            select: { id: true },
+        });
+        if (existing)
+            return res.json({ id: post.id, views: post.views });
+        try {
+            const [, updated] = await prisma_1.prisma.$transaction([
+                prisma_1.prisma.postView.create({ data: { userId, postId: post.id } }),
+                prisma_1.prisma.post.update({ where: { id: post.id }, data: { views: { increment: 1 } }, select: { views: true } }),
+            ]);
+            return res.json({ id: post.id, views: updated.views });
+        }
+        catch {
+            const current = await prisma_1.prisma.post.findUnique({ where: { id: post.id }, select: { views: true } });
+            return res.json({ id: post.id, views: current?.views ?? post.views });
+        }
+    }
+    catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to record post view' });
+    }
+});
+app.post('/api/soundtok', (req, res, next) => {
+    upload.single('video')(req, res, (error) => {
+        if (!error)
+            return next();
+        if (error instanceof multer_1.default.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: 'Video must not exceed 15 MB' });
+        }
+        console.warn('SoundTok multer error:', error);
+        return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid video' });
+    });
+}, async (req, res) => {
+    try {
+        const userId = getUserFromToken(req.headers.authorization);
+        debugLog('SoundTok upload', { userId: userId || null, hasFile: Boolean(req.file) });
         if (!userId) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
@@ -752,7 +1070,7 @@ app.post('/api/soundtok', upload.single('video'), async (req, res) => {
         if (!file) {
             return res.status(400).json({ error: 'Video file required' });
         }
-        const soundTok = await prisma.soundTok.create({
+        const soundTok = await prisma_1.prisma.soundTok.create({
             data: {
                 description,
                 videoUrl: `/uploads/${file.filename}`,
@@ -781,39 +1099,54 @@ app.post('/api/soundtok', upload.single('video'), async (req, res) => {
 app.get('/api/soundtok', async (req, res) => {
     try {
         const userId = getUserFromToken(req.headers.authorization);
+        const take = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+        const skip = Math.max(0, Number(req.query.offset) || 0);
         let followingIds = new Set();
         if (userId) {
-            const follows = await prisma.follow.findMany({
+            const follows = await prisma_1.prisma.follow.findMany({
                 where: { followerId: userId },
                 select: { followingId: true },
             });
             followingIds = new Set(follows.map((f) => f.followingId));
         }
-        const soundToks = await prisma.soundTok.findMany({
-            include: {
-                author: {
-                    select: {
-                        id: true,
-                        username: true
-                    }
+        const [soundToks, total] = await Promise.all([
+            prisma_1.prisma.soundTok.findMany({
+                select: {
+                    id: true,
+                    description: true,
+                    videoUrl: true,
+                    authorId: true,
+                    likes: true,
+                    commentsCount: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    author: { select: authorPreviewSelect },
+                    likesList: userId
+                        ? {
+                            where: { userId },
+                            select: { id: true },
+                        }
+                        : false,
                 },
-                likesList: userId ? {
-                    where: {
-                        userId: userId
-                    }
-                } : false
-            },
-            orderBy: {
-                createdAt: 'desc'
-            }
-        });
-        const soundToksWithIsLiked = soundToks.map(soundTok => ({
+                orderBy: { createdAt: 'desc' },
+                take,
+                skip,
+            }),
+            prisma_1.prisma.soundTok.count(),
+        ]);
+        const items = soundToks.map((soundTok) => ({
             ...soundTok,
-            isLiked: userId ? soundTok.likesList.length > 0 : false,
+            isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
             authorIsFollowed: userId ? followingIds.has(soundTok.authorId) : false,
-            likesList: undefined
+            likesList: undefined,
         }));
-        res.json(soundToksWithIsLiked);
+        res.json({
+            items,
+            total,
+            limit: take,
+            offset: skip,
+            hasMore: skip + items.length < total,
+        });
     }
     catch (error) {
         console.error(error);
@@ -826,7 +1159,7 @@ app.post('/api/soundtok/:id/like', async (req, res) => {
         if (!userId) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
-        const existingLike = await prisma.like.findUnique({
+        const existingLike = await prisma_1.prisma.like.findUnique({
             where: {
                 userId_soundTokId: {
                     userId: userId,
@@ -837,13 +1170,13 @@ app.post('/api/soundtok/:id/like', async (req, res) => {
         if (existingLike) {
             return res.status(400).json({ error: 'Already liked' });
         }
-        await prisma.like.create({
+        await prisma_1.prisma.like.create({
             data: {
                 userId: userId,
                 soundTokId: req.params.id
             }
         });
-        const soundTok = await prisma.soundTok.update({
+        const soundTok = await prisma_1.prisma.soundTok.update({
             where: { id: req.params.id },
             data: {
                 likes: {
@@ -851,6 +1184,13 @@ app.post('/api/soundtok/:id/like', async (req, res) => {
                 }
             }
         });
+        void notificationService_1.notificationService.create({
+            userId: soundTok.authorId,
+            actorId: userId,
+            type: 'LIKE',
+            entityType: 'soundtok',
+            entityId: soundTok.id,
+        }).catch((error) => console.error('Failed to create SoundTok like notification:', error));
         res.json(soundTok);
     }
     catch (error) {
@@ -864,7 +1204,7 @@ app.delete('/api/soundtok/:id/like', async (req, res) => {
         if (!userId) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
-        const existingLike = await prisma.like.findUnique({
+        const existingLike = await prisma_1.prisma.like.findUnique({
             where: {
                 userId_soundTokId: {
                     userId,
@@ -873,13 +1213,13 @@ app.delete('/api/soundtok/:id/like', async (req, res) => {
             }
         });
         if (!existingLike) {
-            const current = await prisma.soundTok.findUnique({
+            const current = await prisma_1.prisma.soundTok.findUnique({
                 where: { id: req.params.id }
             });
             return res.json({ ...current, isLiked: false });
         }
-        const [, soundTok] = await prisma.$transaction([
-            prisma.like.delete({
+        const [, soundTok] = await prisma_1.prisma.$transaction([
+            prisma_1.prisma.like.delete({
                 where: {
                     userId_soundTokId: {
                         userId,
@@ -887,7 +1227,7 @@ app.delete('/api/soundtok/:id/like', async (req, res) => {
                     }
                 }
             }),
-            prisma.soundTok.update({
+            prisma_1.prisma.soundTok.update({
                 where: { id: req.params.id },
                 data: {
                     likes: {
@@ -905,7 +1245,7 @@ app.delete('/api/soundtok/:id/like', async (req, res) => {
 });
 app.get('/api/soundtok/:id/comments', async (req, res) => {
     try {
-        const comments = await prisma.comment.findMany({
+        const comments = await prisma_1.prisma.comment.findMany({
             where: {
                 soundTokId: req.params.id
             },
@@ -938,7 +1278,7 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
         if (!text || text.trim() === '') {
             return res.status(400).json({ error: 'Comment text required' });
         }
-        const comment = await prisma.comment.create({
+        const comment = await prisma_1.prisma.comment.create({
             data: {
                 text,
                 authorId: userId,
@@ -953,15 +1293,22 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
                 }
             }
         });
-        const updated = await prisma.soundTok.update({
+        const updated = await prisma_1.prisma.soundTok.update({
             where: { id: req.params.id },
             data: {
                 commentsCount: {
                     increment: 1
                 }
             },
-            select: { commentsCount: true }
+            select: { id: true, authorId: true, commentsCount: true }
         });
+        void notificationService_1.notificationService.create({
+            userId: updated.authorId,
+            actorId: userId,
+            type: 'COMMENT',
+            entityType: 'soundtok',
+            entityId: updated.id,
+        }).catch((error) => console.error('Failed to create SoundTok comment notification:', error));
         res.status(201).json({ comment, commentsCount: updated.commentsCount });
     }
     catch (error) {
@@ -981,7 +1328,7 @@ app.get('/api/search', async (req, res) => {
             soundToks: []
         };
         if (!type || type === 'users') {
-            const users = await prisma.user.findMany({
+            const users = await prisma_1.prisma.user.findMany({
                 where: {
                     OR: [
                         { username: { contains: q, mode: 'insensitive' } },
@@ -997,7 +1344,7 @@ app.get('/api/search', async (req, res) => {
             results.users = users;
         }
         if (!type || type === 'posts') {
-            const posts = await prisma.post.findMany({
+            const posts = await prisma_1.prisma.post.findMany({
                 where: {
                     content: { contains: q, mode: 'insensitive' }
                 },
@@ -1018,7 +1365,7 @@ app.get('/api/search', async (req, res) => {
             results.posts = posts;
         }
         if (!type || type === 'soundtoks') {
-            const soundToks = await prisma.soundTok.findMany({
+            const soundToks = await prisma_1.prisma.soundTok.findMany({
                 where: {
                     description: { contains: q, mode: 'insensitive' }
                 },
@@ -1044,32 +1391,338 @@ app.get('/api/search', async (req, res) => {
         res.status(500).json({ error: 'Search failed' });
     }
 });
-app.get('/api/admin/users', requireAdmin, async (req, res) => {
-    try {
-        const users = await prisma.user.findMany({
+const parseAdminPage = (req) => {
+    const take = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const skip = Math.max(0, Number(req.query.offset) || 0);
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    return { take, skip, q };
+};
+app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
+    var _a;
+    const now = new Date();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const since7d = new Date(now.getTime() - 7 * dayMs);
+    const since30d = new Date(now.getTime() - 30 * dayMs);
+    const since14d = new Date(now.getTime() - 14 * dayMs);
+    const abandonedBefore = new Date(now.getTime() - 60 * 60 * 1000);
+    const [usersCount, postsCount, soundToksCount, presetsPublished, activePro, activePlatinum, paymentsByKind, subscriptionAgg, tokenAgg, presetPurchasesCount, presetRevenue, pendingPayments, recentPayments, recentPresetPurchases, openReportsCount, startedAll, succeededAll, canceledAll, uniquePayers, abandonedPending, paymentsSince14d, paymentsByKindAll, started7d, succeeded7d, canceled7d, revenue7d, started30d, succeeded30d, canceled30d, revenue30d,] = await Promise.all([
+        prisma_1.prisma.user.count(),
+        prisma_1.prisma.post.count(),
+        prisma_1.prisma.soundTok.count(),
+        prisma_1.prisma.preset.count({ where: { status: 'PUBLISHED' } }),
+        prisma_1.prisma.user.count({
+            where: { plan: 'PRO', OR: [{ planExpiresAt: null }, { planExpiresAt: { gt: now } }] },
+        }),
+        prisma_1.prisma.user.count({
+            where: { plan: 'PLATINUM', OR: [{ planExpiresAt: null }, { planExpiresAt: { gt: now } }] },
+        }),
+        prisma_1.prisma.payment.groupBy({
+            by: ['kind'],
+            where: { status: 'SUCCEEDED' },
+            _count: { _all: true },
+            _sum: { amountRub: true },
+        }),
+        prisma_1.prisma.payment.aggregate({
+            where: { status: 'SUCCEEDED', kind: { in: ['PLAN_PRO', 'PLAN_PLATINUM'] } },
+            _count: { _all: true },
+            _sum: { amountRub: true },
+        }),
+        prisma_1.prisma.payment.aggregate({
+            where: {
+                status: 'SUCCEEDED',
+                kind: { in: ['TOKENS_400', 'TOKENS_800', 'TOKENS_1200', 'TOKENS_2400'] },
+            },
+            _count: { _all: true },
+            _sum: { amountRub: true },
+        }),
+        prisma_1.prisma.presetPurchase.count({ where: { status: 'PAID' } }),
+        prisma_1.prisma.presetPurchase.aggregate({
+            where: { status: 'PAID' },
+            _sum: { amountCents: true },
+        }),
+        prisma_1.prisma.payment.count({ where: { status: { in: ['PENDING', 'WAITING_FOR_CAPTURE'] } } }),
+        prisma_1.prisma.payment.findMany({
+            where: { status: 'SUCCEEDED' },
+            orderBy: { createdAt: 'desc' },
+            take: 8,
+            select: {
+                id: true,
+                kind: true,
+                amountRub: true,
+                status: true,
+                createdAt: true,
+                user: { select: { id: true, username: true } },
+            },
+        }),
+        prisma_1.prisma.presetPurchase.findMany({
+            where: { status: 'PAID' },
+            orderBy: { purchasedAt: 'desc' },
+            take: 8,
+            select: {
+                id: true,
+                amountCents: true,
+                currency: true,
+                purchasedAt: true,
+                buyer: { select: { id: true, username: true } },
+                preset: { select: { id: true, title: true } },
+            },
+        }),
+        prisma_1.prisma.userReport.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
+        prisma_1.prisma.payment.count(),
+        prisma_1.prisma.payment.count({ where: { status: 'SUCCEEDED' } }),
+        prisma_1.prisma.payment.count({ where: { status: 'CANCELED' } }),
+        prisma_1.prisma.payment.findMany({
+            where: { status: 'SUCCEEDED' },
+            select: { userId: true },
+            distinct: ['userId'],
+        }),
+        prisma_1.prisma.payment.count({
+            where: {
+                status: { in: ['PENDING', 'WAITING_FOR_CAPTURE'] },
+                createdAt: { lt: abandonedBefore },
+            },
+        }),
+        prisma_1.prisma.payment.findMany({
+            where: { createdAt: { gte: since14d } },
+            select: { kind: true, status: true, amountRub: true, createdAt: true },
+            orderBy: { createdAt: 'asc' },
+        }),
+        prisma_1.prisma.payment.groupBy({
+            by: ['kind', 'status'],
+            _count: { _all: true },
+            _sum: { amountRub: true },
+        }),
+        prisma_1.prisma.payment.count({ where: { createdAt: { gte: since7d } } }),
+        prisma_1.prisma.payment.count({ where: { status: 'SUCCEEDED', createdAt: { gte: since7d } } }),
+        prisma_1.prisma.payment.count({ where: { status: 'CANCELED', createdAt: { gte: since7d } } }),
+        prisma_1.prisma.payment.aggregate({
+            where: { status: 'SUCCEEDED', createdAt: { gte: since7d } },
+            _sum: { amountRub: true },
+        }),
+        prisma_1.prisma.payment.count({ where: { createdAt: { gte: since30d } } }),
+        prisma_1.prisma.payment.count({ where: { status: 'SUCCEEDED', createdAt: { gte: since30d } } }),
+        prisma_1.prisma.payment.count({ where: { status: 'CANCELED', createdAt: { gte: since30d } } }),
+        prisma_1.prisma.payment.aggregate({
+            where: { status: 'SUCCEEDED', createdAt: { gte: since30d } },
+            _sum: { amountRub: true },
+        }),
+    ]);
+    const subscriptionsCount = subscriptionAgg._count._all;
+    const subscriptionsRevenueRub = subscriptionAgg._sum.amountRub || 0;
+    const tokensCount = tokenAgg._count._all;
+    const tokensRevenueRub = tokenAgg._sum.amountRub || 0;
+    const paymentsRevenueRub = subscriptionsRevenueRub + tokensRevenueRub;
+    const byKind = Object.fromEntries(paymentsByKind.map((row) => [
+        row.kind,
+        { count: row._count._all, revenueRub: row._sum.amountRub || 0 },
+    ]));
+    const pct = (num, den) => den > 0 ? Math.round((num / den) * 1000) / 10 : 0;
+    const funnelByKind = {};
+    for (const row of paymentsByKindAll) {
+        const slot = (funnelByKind[_a = row.kind] || (funnelByKind[_a] = {
+            started: 0,
+            paid: 0,
+            canceled: 0,
+            pending: 0,
+            revenueRub: 0,
+            conversionPct: 0,
+        }));
+        slot.started += row._count._all;
+        if (row.status === 'SUCCEEDED') {
+            slot.paid += row._count._all;
+            slot.revenueRub += row._sum.amountRub || 0;
+        }
+        else if (row.status === 'CANCELED') {
+            slot.canceled += row._count._all;
+        }
+        else {
+            slot.pending += row._count._all;
+        }
+    }
+    for (const slot of Object.values(funnelByKind)) {
+        slot.conversionPct = pct(slot.paid, slot.started);
+    }
+    const dailyMap = new Map();
+    for (let i = 13; i >= 0; i -= 1) {
+        const d = new Date(now.getTime() - i * dayMs);
+        const key = d.toISOString().slice(0, 10);
+        dailyMap.set(key, { date: key, clicked: 0, paid: 0, canceled: 0, revenueRub: 0 });
+    }
+    for (const p of paymentsSince14d) {
+        const key = p.createdAt.toISOString().slice(0, 10);
+        const slot = dailyMap.get(key);
+        if (!slot)
+            continue;
+        slot.clicked += 1;
+        if (p.status === 'SUCCEEDED') {
+            slot.paid += 1;
+            slot.revenueRub += p.amountRub;
+        }
+        else if (p.status === 'CANCELED') {
+            slot.canceled += 1;
+        }
+    }
+    res.json({
+        totals: {
+            users: usersCount,
+            posts: postsCount,
+            soundToks: soundToksCount,
+            presetsPublished,
+            pendingPayments,
+            openReports: openReportsCount,
+        },
+        plans: {
+            activePro,
+            activePlatinum,
+            activePaid: activePro + activePlatinum,
+        },
+        purchases: {
+            subscriptions: { count: subscriptionsCount, revenueRub: subscriptionsRevenueRub },
+            tokens: { count: tokensCount, revenueRub: tokensRevenueRub },
+            presets: {
+                count: presetPurchasesCount,
+                revenueRub: Math.round((presetRevenue._sum.amountCents || 0) / 100),
+                revenueCents: presetRevenue._sum.amountCents || 0,
+            },
+            paymentsRevenueRub,
+            totalRevenueRub: paymentsRevenueRub + Math.round((presetRevenue._sum.amountCents || 0) / 100),
+        },
+        byKind,
+        funnel: {
+            clicked: startedAll,
+            pending: pendingPayments,
+            paid: succeededAll,
+            canceled: canceledAll,
+            abandonedPending,
+            conversionPct: pct(succeededAll, startedAll),
+            cancelPct: pct(canceledAll, startedAll),
+            uniquePayers: uniquePayers.length,
+            avgTicketRub: succeededAll > 0 ? Math.round(paymentsRevenueRub / succeededAll) : 0,
+            last7d: {
+                clicked: started7d,
+                paid: succeeded7d,
+                canceled: canceled7d,
+                revenueRub: revenue7d._sum.amountRub || 0,
+                conversionPct: pct(succeeded7d, started7d),
+            },
+            last30d: {
+                clicked: started30d,
+                paid: succeeded30d,
+                canceled: canceled30d,
+                revenueRub: revenue30d._sum.amountRub || 0,
+                conversionPct: pct(succeeded30d, started30d),
+            },
+            byKind: funnelByKind,
+            daily: Array.from(dailyMap.values()),
+        },
+        recent: {
+            payments: recentPayments,
+            presetPurchases: recentPresetPurchases,
+        },
+    });
+}));
+app.get('/api/admin/payments', requireAdmin, asyncRoute(async (req, res) => {
+    const { take, skip } = parseAdminPage(req);
+    const kind = typeof req.query.kind === 'string' ? req.query.kind : '';
+    const status = typeof req.query.status === 'string' ? req.query.status : 'SUCCEEDED';
+    const where = {};
+    if (status === 'PENDING') {
+        where.status = { in: ['PENDING', 'WAITING_FOR_CAPTURE'] };
+    }
+    else if (status && status !== 'ALL') {
+        where.status = status;
+    }
+    if (kind === 'subscriptions')
+        where.kind = { in: ['PLAN_PRO', 'PLAN_PLATINUM'] };
+    else if (kind === 'tokens')
+        where.kind = { in: ['TOKENS_400', 'TOKENS_800', 'TOKENS_1200', 'TOKENS_2400'] };
+    else if (kind)
+        where.kind = kind;
+    const [items, total] = await Promise.all([
+        prisma_1.prisma.payment.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+            take,
+            skip,
+            select: {
+                id: true,
+                kind: true,
+                status: true,
+                amountRub: true,
+                description: true,
+                yookassaPaymentId: true,
+                createdAt: true,
+                updatedAt: true,
+                user: { select: { id: true, username: true, email: true } },
+            },
+        }),
+        prisma_1.prisma.payment.count({ where }),
+    ]);
+    res.json({ items, total, limit: take, offset: skip });
+}));
+app.get('/api/admin/preset-purchases', requireAdmin, asyncRoute(async (req, res) => {
+    const { take, skip } = parseAdminPage(req);
+    const where = { status: 'PAID' };
+    const [items, total] = await Promise.all([
+        prisma_1.prisma.presetPurchase.findMany({
+            where,
+            orderBy: { purchasedAt: 'desc' },
+            take,
+            skip,
+            select: {
+                id: true,
+                amountCents: true,
+                currency: true,
+                status: true,
+                provider: true,
+                purchasedAt: true,
+                buyer: { select: { id: true, username: true, email: true } },
+                preset: { select: { id: true, title: true, priceCents: true } },
+            },
+        }),
+        prisma_1.prisma.presetPurchase.count({ where }),
+    ]);
+    res.json({ items, total, limit: take, offset: skip });
+}));
+app.get('/api/admin/users', requireAdmin, asyncRoute(async (req, res) => {
+    const { take, skip, q } = parseAdminPage(req);
+    const where = q
+        ? {
+            OR: [
+                { username: { contains: q, mode: 'insensitive' } },
+                { email: { contains: q, mode: 'insensitive' } },
+            ],
+        }
+        : {};
+    const [items, total] = await Promise.all([
+        prisma_1.prisma.user.findMany({
+            where,
             select: {
                 id: true,
                 username: true,
                 email: true,
                 role: true,
+                plan: true,
+                planExpiresAt: true,
+                tokenBalance: true,
                 createdAt: true,
-                updatedAt: true
+                updatedAt: true,
             },
-            orderBy: { createdAt: 'desc' }
-        });
-        res.json(users);
-    }
-    catch (error) {
-        res.status(500).json({ error: 'Failed to fetch users' });
-    }
-});
+            orderBy: { createdAt: 'desc' },
+            take,
+            skip,
+        }),
+        prisma_1.prisma.user.count({ where }),
+    ]);
+    res.json({ items, total, limit: take, offset: skip });
+}));
 app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
     try {
         const userId = req.params.id;
         if (req.user?.id === userId) {
             return res.status(400).json({ error: 'Cannot delete your own admin account' });
         }
-        const target = await prisma.user.findUnique({
+        const target = await prisma_1.prisma.user.findUnique({
             where: { id: userId },
             select: { id: true, role: true },
         });
@@ -1079,7 +1732,7 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
         if (target.role === 'ADMIN') {
             return res.status(403).json({ error: 'Cannot delete another admin account' });
         }
-        await prisma.user.delete({ where: { id: userId } });
+        await prisma_1.prisma.user.delete({ where: { id: userId } });
         res.json({ message: 'User deleted successfully' });
     }
     catch (error) {
@@ -1092,7 +1745,7 @@ app.patch('/api/admin/users/:id/ban', requireAdmin, async (req, res) => {
         if (req.user?.id === userId) {
             return res.status(400).json({ error: 'Cannot ban your own admin account' });
         }
-        const target = await prisma.user.findUnique({
+        const target = await prisma_1.prisma.user.findUnique({
             where: { id: userId },
             select: { id: true, role: true },
         });
@@ -1102,79 +1755,214 @@ app.patch('/api/admin/users/:id/ban', requireAdmin, async (req, res) => {
         if (target.role === 'ADMIN') {
             return res.status(403).json({ error: 'Cannot ban another admin account' });
         }
-        await prisma.user.delete({ where: { id: userId } });
+        await prisma_1.prisma.user.delete({ where: { id: userId } });
         res.json({ message: 'User banned successfully' });
     }
     catch (error) {
         res.status(500).json({ error: 'Failed to ban user' });
     }
 });
-app.get('/api/admin/posts', requireAdmin, async (req, res) => {
-    try {
-        const posts = await prisma.post.findMany({
-            include: {
-                media: true,
-                author: {
-                    select: {
-                        id: true,
-                        username: true
-                    }
-                }
+app.get('/api/admin/posts', requireAdmin, asyncRoute(async (req, res) => {
+    const { take, skip } = parseAdminPage(req);
+    const [items, total] = await Promise.all([
+        prisma_1.prisma.post.findMany({
+            select: {
+                id: true,
+                content: true,
+                createdAt: true,
+                author: { select: { id: true, username: true } },
+                media: { select: { id: true, type: true, url: true } },
             },
-            orderBy: { createdAt: 'desc' }
-        });
-        res.json(posts);
-    }
-    catch (error) {
-        res.status(500).json({ error: 'Failed to fetch posts' });
-    }
-});
+            orderBy: { createdAt: 'desc' },
+            take,
+            skip,
+        }),
+        prisma_1.prisma.post.count(),
+    ]);
+    res.json({ items, total, limit: take, offset: skip });
+}));
 app.delete('/api/admin/posts/:id', requireAdmin, async (req, res) => {
     try {
         const postId = req.params.id;
-        await prisma.post.delete({ where: { id: postId } });
+        await prisma_1.prisma.post.delete({ where: { id: postId } });
         res.json({ message: 'Post deleted successfully' });
     }
     catch (error) {
         res.status(500).json({ error: 'Failed to delete post' });
     }
 });
-app.get('/api/admin/soundtoks', requireAdmin, async (req, res) => {
-    try {
-        const soundToks = await prisma.soundTok.findMany({
-            include: {
-                author: {
-                    select: {
-                        id: true,
-                        username: true
-                    }
-                }
+app.get('/api/admin/soundtoks', requireAdmin, asyncRoute(async (req, res) => {
+    const { take, skip } = parseAdminPage(req);
+    const [items, total] = await Promise.all([
+        prisma_1.prisma.soundTok.findMany({
+            select: {
+                id: true,
+                description: true,
+                videoUrl: true,
+                likes: true,
+                createdAt: true,
+                author: { select: { id: true, username: true } },
             },
-            orderBy: { createdAt: 'desc' }
-        });
-        res.json(soundToks);
-    }
-    catch (error) {
-        res.status(500).json({ error: 'Failed to fetch soundtoks' });
-    }
-});
+            orderBy: { createdAt: 'desc' },
+            take,
+            skip,
+        }),
+        prisma_1.prisma.soundTok.count(),
+    ]);
+    res.json({ items, total, limit: take, offset: skip });
+}));
 app.delete('/api/admin/soundtoks/:id', requireAdmin, async (req, res) => {
     try {
         const soundTokId = req.params.id;
-        await prisma.soundTok.delete({ where: { id: soundTokId } });
+        await prisma_1.prisma.soundTok.delete({ where: { id: soundTokId } });
         res.json({ message: 'SoundTok deleted successfully' });
     }
     catch (error) {
         res.status(500).json({ error: 'Failed to delete soundtok' });
     }
 });
+const reportUserSelect = {
+    id: true,
+    username: true,
+    displayName: true,
+    avatar: true,
+    role: true,
+    email: true,
+};
+app.post('/api/reports', authenticateToken, asyncRoute(async (req, res) => {
+    const reportedUserId = typeof req.body?.reportedUserId === 'string' ? req.body.reportedUserId.trim() : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().toUpperCase() : '';
+    const detailsRaw = typeof req.body?.details === 'string' ? req.body.details.trim() : '';
+    const details = detailsRaw.slice(0, 1000) || null;
+    if (!reportedUserId) {
+        return res.status(400).json({ error: 'reportedUserId required' });
+    }
+    if (!REPORT_REASONS.includes(reason)) {
+        return res.status(400).json({ error: 'Invalid reason', allowed: REPORT_REASONS });
+    }
+    if (reportedUserId === req.user.id) {
+        return res.status(400).json({ error: 'Cannot report yourself' });
+    }
+    const target = await prisma_1.prisma.user.findUnique({
+        where: { id: reportedUserId },
+        select: { id: true, username: true, role: true },
+    });
+    if (!target) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+    if (target.role === 'ADMIN') {
+        return res.status(400).json({ error: 'Cannot report an admin account' });
+    }
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const recentCount = await prisma_1.prisma.userReport.count({
+        where: { reporterId: req.user.id, createdAt: { gte: hourAgo } },
+    });
+    if (recentCount >= 5) {
+        return res.status(429).json({ error: 'Too many reports. Try again later.' });
+    }
+    const openDuplicate = await prisma_1.prisma.userReport.findFirst({
+        where: {
+            reporterId: req.user.id,
+            reportedId: reportedUserId,
+            status: { in: ['OPEN', 'REVIEWING'] },
+        },
+        select: { id: true },
+    });
+    if (openDuplicate) {
+        return res.status(409).json({ error: 'You already have an open report against this user', reportId: openDuplicate.id });
+    }
+    const report = await prisma_1.prisma.userReport.create({
+        data: {
+            reporterId: req.user.id,
+            reportedId: reportedUserId,
+            reason: reason,
+            details,
+        },
+        select: {
+            id: true,
+            reason: true,
+            status: true,
+            details: true,
+            createdAt: true,
+            reported: { select: { id: true, username: true } },
+        },
+    });
+    void (0, emailService_1.sendAdminNotification)('Новая жалоба на пользователя', `Reporter: @${req.user.username}\nReported: @${target.username}\nReason: ${reason}\nDetails: ${details || '—'}`);
+    res.status(201).json({ report });
+}));
+app.get('/api/admin/reports', requireAdmin, asyncRoute(async (req, res) => {
+    const { take, skip } = parseAdminPage(req);
+    const status = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : 'OPEN';
+    const where = status && status !== 'ALL' && REPORT_STATUSES.includes(status)
+        ? { status: status }
+        : {};
+    const [items, total, openCount] = await Promise.all([
+        prisma_1.prisma.userReport.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+            take,
+            skip,
+            select: {
+                id: true,
+                reason: true,
+                details: true,
+                status: true,
+                adminNote: true,
+                resolvedAt: true,
+                createdAt: true,
+                updatedAt: true,
+                reporter: { select: reportUserSelect },
+                reported: { select: reportUserSelect },
+            },
+        }),
+        prisma_1.prisma.userReport.count({ where }),
+        prisma_1.prisma.userReport.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
+    ]);
+    res.json({ items, total, openCount, limit: take, offset: skip });
+}));
+app.patch('/api/admin/reports/:id', requireAdmin, asyncRoute(async (req, res) => {
+    const status = typeof req.body?.status === 'string' ? req.body.status.trim().toUpperCase() : '';
+    const adminNote = typeof req.body?.adminNote === 'string' ? req.body.adminNote.trim().slice(0, 1000) : undefined;
+    if (status && !REPORT_STATUSES.includes(status)) {
+        return res.status(400).json({ error: 'Invalid status', allowed: REPORT_STATUSES });
+    }
+    const existing = await prisma_1.prisma.userReport.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!existing) {
+        return res.status(404).json({ error: 'Report not found' });
+    }
+    const updated = await prisma_1.prisma.userReport.update({
+        where: { id: req.params.id },
+        data: {
+            ...(status ? { status: status } : {}),
+            ...(adminNote !== undefined ? { adminNote: adminNote || null } : {}),
+            ...((status === 'RESOLVED' || status === 'DISMISSED')
+                ? { resolvedAt: new Date() }
+                : status === 'OPEN' || status === 'REVIEWING'
+                    ? { resolvedAt: null }
+                    : {}),
+        },
+        select: {
+            id: true,
+            reason: true,
+            details: true,
+            status: true,
+            adminNote: true,
+            resolvedAt: true,
+            createdAt: true,
+            updatedAt: true,
+            reporter: { select: reportUserSelect },
+            reported: { select: reportUserSelect },
+        },
+    });
+    res.json({ report: updated });
+}));
 app.get('/api/users/:userId/presence', authenticateToken, async (req, res) => {
     try {
         if (!req.user) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
         const { userId } = req.params;
-        const user = await prisma.user.findUnique({
+        const user = await prisma_1.prisma.user.findUnique({
             where: { id: userId },
             select: { id: true },
         });
@@ -1194,7 +1982,7 @@ app.get('/api/users/available', authenticateToken, async (req, res) => {
             return res.status(401).json({ error: 'Unauthorized' });
         }
         const currentUserId = req.user.id;
-        const users = await prisma.user.findMany({
+        const users = await prisma_1.prisma.user.findMany({
             where: {
                 id: { not: currentUserId },
                 role: 'USER'
@@ -1202,6 +1990,12 @@ app.get('/api/users/available', authenticateToken, async (req, res) => {
             select: {
                 id: true,
                 username: true,
+                displayName: true,
+                avatar: true,
+                battleElo: true,
+                battleWins: true,
+                battleLosses: true,
+                battleDraws: true,
                 createdAt: true,
                 _count: {
                     select: {
@@ -1211,14 +2005,223 @@ app.get('/api/users/available', authenticateToken, async (req, res) => {
                 }
             },
             orderBy: {
-                createdAt: 'desc'
+                battleElo: 'desc'
             }
         });
-        res.json(users);
+        res.json(users.map((u) => ({
+            ...u,
+            ...(0, battleRating_1.battleRatingPayload)(u),
+        })));
     }
     catch (error) {
         console.error('Error fetching available users:', error);
         res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
+app.get('/api/battles/me/rating', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const user = await prisma_1.prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { battleElo: true, battleWins: true, battleLosses: true, battleDraws: true },
+        });
+        if (!user)
+            return res.status(404).json({ error: 'User not found' });
+        res.json((0, battleRating_1.battleRatingPayload)(user));
+    }
+    catch (error) {
+        console.error('Error fetching battle rating:', error);
+        res.status(500).json({ error: 'Failed to fetch rating' });
+    }
+});
+async function tryMatchBattleQueue(userId) {
+    const me = await prisma_1.prisma.battleQueueEntry.findUnique({ where: { userId } });
+    if (!me)
+        return null;
+    const windows = [100, 200, 400, 800, 2000];
+    for (const window of windows) {
+        const candidates = await prisma_1.prisma.battleQueueEntry.findMany({
+            where: {
+                userId: { not: userId },
+                elo: { gte: me.elo - window, lte: me.elo + window },
+            },
+            orderBy: { joinedAt: 'asc' },
+            take: 20,
+        });
+        if (!candidates.length)
+            continue;
+        candidates.sort((a, b) => {
+            const da = Math.abs(a.elo - me.elo);
+            const db = Math.abs(b.elo - me.elo);
+            if (da !== db)
+                return da - db;
+            return a.joinedAt.getTime() - b.joinedAt.getTime();
+        });
+        const opponent = candidates[0];
+        const creatorIsMe = me.joinedAt <= opponent.joinedAt;
+        const creator = creatorIsMe ? me : opponent;
+        const opp = creatorIsMe ? opponent : me;
+        const battle = await prisma_1.prisma.$transaction(async (tx) => {
+            const stillMe = await tx.battleQueueEntry.findUnique({ where: { userId: me.userId } });
+            const stillOpp = await tx.battleQueueEntry.findUnique({ where: { userId: opponent.userId } });
+            if (!stillMe || !stillOpp)
+                return null;
+            const created = await tx.battle.create({
+                data: {
+                    title: creator.title || 'Ranked Battle',
+                    description: 'Подбор по рейтингу',
+                    creatorId: creator.userId,
+                    status: creator.beatUrl ? 'USER1_TURN' : 'SELECTING_BEAT',
+                    beatUrl: creator.beatUrl || null,
+                    beatName: creator.beatName || null,
+                    participants: {
+                        create: [
+                            { userId: creator.userId, role: 'CREATOR', acceptedAt: new Date() },
+                            { userId: opp.userId, role: 'OPPONENT', acceptedAt: new Date() },
+                        ],
+                    },
+                },
+                include: {
+                    creator: { select: { id: true, username: true, battleElo: true } },
+                    participants: {
+                        include: {
+                            user: { select: { id: true, username: true, battleElo: true, battleWins: true, battleLosses: true, battleDraws: true } },
+                        },
+                    },
+                    recordings: true,
+                    _count: { select: { recordings: true } },
+                },
+            });
+            await tx.battleQueueEntry.deleteMany({
+                where: { userId: { in: [me.userId, opponent.userId] } },
+            });
+            return created;
+        });
+        return battle;
+    }
+    return null;
+}
+app.post('/api/battles/queue', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const userId = req.user.id;
+        const title = typeof req.body?.title === 'string' && req.body.title.trim()
+            ? req.body.title.trim().slice(0, 80)
+            : 'Ranked Battle';
+        const beatUrl = typeof req.body?.beatUrl === 'string' ? req.body.beatUrl : null;
+        const beatName = typeof req.body?.beatName === 'string' ? req.body.beatName : null;
+        if (!beatUrl) {
+            return res.status(400).json({ error: 'Beat is required to join ranked queue' });
+        }
+        const user = await prisma_1.prisma.user.findUnique({
+            where: { id: userId },
+            select: { battleElo: true },
+        });
+        if (!user)
+            return res.status(404).json({ error: 'User not found' });
+        await prisma_1.prisma.battleQueueEntry.upsert({
+            where: { userId },
+            create: {
+                userId,
+                elo: user.battleElo ?? battleRating_1.BATTLE_ELO_DEFAULT,
+                title,
+                beatUrl,
+                beatName,
+            },
+            update: {
+                elo: user.battleElo ?? battleRating_1.BATTLE_ELO_DEFAULT,
+                title,
+                beatUrl,
+                beatName,
+                joinedAt: new Date(),
+            },
+        });
+        const matched = await tryMatchBattleQueue(userId);
+        if (matched) {
+            return res.json({ status: 'matched', battle: matched });
+        }
+        const waiting = await prisma_1.prisma.battleQueueEntry.count();
+        const fullUser = await prisma_1.prisma.user.findUnique({
+            where: { id: userId },
+            select: { battleElo: true, battleWins: true, battleLosses: true, battleDraws: true },
+        });
+        res.json({
+            status: 'waiting',
+            elo: user.battleElo ?? battleRating_1.BATTLE_ELO_DEFAULT,
+            rank: (0, battleRating_1.battleRatingPayload)(fullUser || user),
+            queueSize: waiting,
+        });
+    }
+    catch (error) {
+        console.error('Error joining battle queue:', error);
+        res.status(500).json({ error: 'Failed to join queue' });
+    }
+});
+app.get('/api/battles/queue/status', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: 'Unauthorized' });
+        const userId = req.user.id;
+        const active = await prisma_1.prisma.battle.findFirst({
+            where: {
+                status: { in: ['SELECTING_BEAT', 'USER1_TURN', 'USER2_TURN', 'JUDGING'] },
+                OR: [
+                    { creatorId: userId },
+                    { participants: { some: { userId } } },
+                ],
+                createdAt: { gte: new Date(Date.now() - 2 * 60 * 60 * 1000) },
+            },
+            orderBy: { createdAt: 'desc' },
+            include: {
+                creator: { select: { id: true, username: true, battleElo: true } },
+                participants: {
+                    include: {
+                        user: { select: { id: true, username: true, battleElo: true, battleWins: true, battleLosses: true, battleDraws: true } },
+                    },
+                },
+                recordings: true,
+                _count: { select: { recordings: true } },
+            },
+        });
+        const entry = await prisma_1.prisma.battleQueueEntry.findUnique({ where: { userId } });
+        if (!entry) {
+            if (active)
+                return res.json({ status: 'matched', battle: active });
+            return res.json({ status: 'idle' });
+        }
+        const matched = await tryMatchBattleQueue(userId);
+        if (matched)
+            return res.json({ status: 'matched', battle: matched });
+        const waiting = await prisma_1.prisma.battleQueueEntry.count();
+        const fullUser = await prisma_1.prisma.user.findUnique({
+            where: { id: userId },
+            select: { battleElo: true, battleWins: true, battleLosses: true, battleDraws: true },
+        });
+        res.json({
+            status: 'waiting',
+            elo: entry.elo,
+            rank: (0, battleRating_1.battleRatingPayload)(fullUser || { battleElo: entry.elo }),
+            queueSize: waiting,
+            joinedAt: entry.joinedAt,
+        });
+    }
+    catch (error) {
+        console.error('Error checking battle queue:', error);
+        res.status(500).json({ error: 'Failed to check queue' });
+    }
+});
+app.delete('/api/battles/queue', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: 'Unauthorized' });
+        await prisma_1.prisma.battleQueueEntry.deleteMany({ where: { userId: req.user.id } });
+        res.json({ success: true, status: 'idle' });
+    }
+    catch (error) {
+        console.error('Error leaving battle queue:', error);
+        res.status(500).json({ error: 'Failed to leave queue' });
     }
 });
 app.post('/api/battles', authenticateToken, async (req, res) => {
@@ -1234,13 +2237,13 @@ app.post('/api/battles', authenticateToken, async (req, res) => {
         if (opponentId === creatorId) {
             return res.status(400).json({ error: 'Cannot invite yourself' });
         }
-        const opponent = await prisma.user.findUnique({
+        const opponent = await prisma_1.prisma.user.findUnique({
             where: { id: opponentId }
         });
         if (!opponent) {
             return res.status(404).json({ error: 'Opponent not found' });
         }
-        const battle = await prisma.battle.create({
+        const battle = await prisma_1.prisma.battle.create({
             data: {
                 title,
                 description,
@@ -1292,7 +2295,7 @@ app.get('/api/battles', authenticateToken, async (req, res) => {
             return res.status(401).json({ error: 'Unauthorized' });
         }
         const userId = req.user.id;
-        const battles = await prisma.battle.findMany({
+        const battles = await prisma_1.prisma.battle.findMany({
             where: {
                 OR: [
                     { creatorId: userId },
@@ -1355,7 +2358,7 @@ app.get('/api/battles/invitations', authenticateToken, async (req, res) => {
             return res.status(401).json({ error: 'Unauthorized' });
         }
         const userId = req.user.id;
-        const invitations = await prisma.battle.findMany({
+        const invitations = await prisma_1.prisma.battle.findMany({
             where: {
                 status: 'INVITING',
                 creatorId: { not: userId },
@@ -1405,7 +2408,7 @@ app.patch('/api/battles/:id/respond', authenticateToken, async (req, res) => {
         const userId = req.user.id;
         const { accept } = req.body;
         console.log(`Looking for participant: battleId=${battleId}, userId=${userId}, role=OPPONENT`);
-        const participant = await prisma.battleParticipant.findFirst({
+        const participant = await prisma_1.prisma.battleParticipant.findFirst({
             where: {
                 battleId,
                 userId,
@@ -1414,7 +2417,7 @@ app.patch('/api/battles/:id/respond', authenticateToken, async (req, res) => {
         });
         console.log(`Found participant:`, participant);
         if (!participant) {
-            const allParticipants = await prisma.battleParticipant.findMany({
+            const allParticipants = await prisma_1.prisma.battleParticipant.findMany({
                 where: { battleId },
                 include: { user: true }
             });
@@ -1422,13 +2425,13 @@ app.patch('/api/battles/:id/respond', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: 'Battle invitation not found' });
         }
         if (accept) {
-            await prisma.battleParticipant.update({
+            await prisma_1.prisma.battleParticipant.update({
                 where: { id: participant.id },
                 data: {
                     acceptedAt: new Date()
                 }
             });
-            await prisma.battle.update({
+            await prisma_1.prisma.battle.update({
                 where: { id: battleId },
                 data: {
                     status: 'USER1_TURN'
@@ -1436,7 +2439,7 @@ app.patch('/api/battles/:id/respond', authenticateToken, async (req, res) => {
             });
         }
         else {
-            await prisma.battle.update({
+            await prisma_1.prisma.battle.update({
                 where: { id: battleId },
                 data: {
                     status: 'CANCELLED'
@@ -1457,7 +2460,7 @@ app.patch('/api/battles/:id/beat', authenticateToken, async (req, res) => {
         }
         const battleId = req.params.id;
         const { beatUrl, beatName } = req.body;
-        const battle = await prisma.battle.findUnique({
+        const battle = await prisma_1.prisma.battle.findUnique({
             where: { id: battleId }
         });
         if (!battle) {
@@ -1472,7 +2475,7 @@ app.patch('/api/battles/:id/beat', authenticateToken, async (req, res) => {
         if (battle.status !== 'INVITING' && battle.status !== 'SELECTING_BEAT') {
             return res.status(403).json({ error: 'Battle is not in beat selection phase' });
         }
-        await prisma.battle.update({
+        await prisma_1.prisma.battle.update({
             where: { id: battleId },
             data: {
                 beatUrl,
@@ -1497,13 +2500,13 @@ app.patch('/api/battles/:id/status', authenticateToken, async (req, res) => {
         if (!validStatuses.includes(status)) {
             return res.status(400).json({ error: 'Invalid battle status' });
         }
-        const battle = await prisma.battle.findUnique({
+        const battle = await prisma_1.prisma.battle.findUnique({
             where: { id: battleId }
         });
         if (!battle) {
             return res.status(404).json({ error: 'Battle not found' });
         }
-        const participant = await prisma.battleParticipant.findFirst({
+        const participant = await prisma_1.prisma.battleParticipant.findFirst({
             where: {
                 battleId,
                 userId: req.user.id
@@ -1512,7 +2515,7 @@ app.patch('/api/battles/:id/status', authenticateToken, async (req, res) => {
         if (!participant && battle.creatorId !== req.user.id) {
             return res.status(403).json({ error: 'You are not a participant in this battle' });
         }
-        await prisma.battle.update({
+        await prisma_1.prisma.battle.update({
             where: { id: battleId },
             data: { status }
         });
@@ -1556,7 +2559,7 @@ app.get('/api/battles/:id/recordings', authenticateToken, async (req, res) => {
             return res.status(401).json({ error: 'Unauthorized' });
         }
         const battleId = req.params.id;
-        const battle = await prisma.battle.findUnique({
+        const battle = await prisma_1.prisma.battle.findUnique({
             where: { id: battleId },
             include: {
                 recordings: {
@@ -1578,7 +2581,7 @@ app.get('/api/battles/:id/recordings', authenticateToken, async (req, res) => {
         if (!battle) {
             return res.status(404).json({ error: 'Battle not found' });
         }
-        const participant = await prisma.battleParticipant.findFirst({
+        const participant = await prisma_1.prisma.battleParticipant.findFirst({
             where: {
                 battleId,
                 userId: req.user.id
@@ -1606,7 +2609,7 @@ app.post('/api/battles/:id/recordings', authenticateToken, upload.single('audio'
             return res.status(400).json({ error: 'Audio file is required' });
         }
         const voiceUrl = `/uploads/${req.file.filename}`;
-        const participant = await prisma.battleParticipant.findFirst({
+        const participant = await prisma_1.prisma.battleParticipant.findFirst({
             where: {
                 battleId,
                 userId
@@ -1616,7 +2619,7 @@ app.post('/api/battles/:id/recordings', authenticateToken, upload.single('audio'
             return res.status(403).json({ error: 'Not a battle participant' });
         }
         const fileBuffer = fs_1.default.readFileSync(path_1.default.join(uploadsDir, req.file.filename));
-        const recording = await prisma.battleRecording.create({
+        const recording = await prisma_1.prisma.battleRecording.create({
             data: {
                 battleId,
                 userId,
@@ -1635,12 +2638,12 @@ app.post('/api/battles/:id/recordings', authenticateToken, upload.single('audio'
                 }
             }
         });
-        const recordings = await prisma.battleRecording.findMany({
+        const recordings = await prisma_1.prisma.battleRecording.findMany({
             where: { battleId },
             distinct: ['userId']
         });
         if (recordings.length === 2) {
-            await prisma.battle.update({
+            await prisma_1.prisma.battle.update({
                 where: { id: battleId },
                 data: {
                     status: 'JUDGING'
@@ -1660,7 +2663,7 @@ app.get('/api/battles/:id/recordings/:recordingId/voice-blob', authenticateToken
             return res.status(401).json({ error: 'Unauthorized' });
         }
         const recordingId = req.params.recordingId;
-        const recording = await prisma.battleRecording.findFirst({
+        const recording = await prisma_1.prisma.battleRecording.findFirst({
             where: {
                 id: recordingId,
             }
@@ -1718,7 +2721,7 @@ app.post('/api/battles/:id/rate', authenticateToken, async (req, res) => {
         if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
             return res.status(400).json({ error: 'Rating must be an integer from 1 to 5' });
         }
-        const battle = await prisma.battle.findUnique({
+        const battle = await prisma_1.prisma.battle.findUnique({
             where: { id: battleId },
             include: {
                 participants: true,
@@ -1740,19 +2743,19 @@ app.post('/api/battles/:id/rate', authenticateToken, async (req, res) => {
         if (existing) {
             return res.status(400).json({ error: 'You have already rated this battle' });
         }
-        await prisma.battleRating.create({
+        await prisma_1.prisma.battleRating.create({
             data: {
                 battleId,
                 raterId: userId,
                 rating
             }
         });
-        const allRatings = await prisma.battleRating.findMany({
+        const allRatings = await prisma_1.prisma.battleRating.findMany({
             where: { battleId }
         });
         const result = buildPeerRatingResult(battle, allRatings, userId);
         if (result.bothRated && result.winner) {
-            await prisma.battle.update({
+            await prisma_1.prisma.battle.update({
                 where: { id: battleId },
                 data: {
                     status: 'FINISHED',
@@ -1761,6 +2764,7 @@ app.post('/api/battles/:id/rate', authenticateToken, async (req, res) => {
                     judgedAt: new Date()
                 }
             });
+            await (0, battleEloService_1.applyBattleEloResult)(battleId, result.winner);
             result.status = 'FINISHED';
         }
         res.json({
@@ -1781,7 +2785,7 @@ app.get('/api/battles/:id/ratings', authenticateToken, async (req, res) => {
         }
         const battleId = req.params.id;
         const userId = req.user.id;
-        const battle = await prisma.battle.findUnique({
+        const battle = await prisma_1.prisma.battle.findUnique({
             where: { id: battleId },
             include: {
                 participants: true,
@@ -1806,7 +2810,7 @@ app.get('/api/battles/:id/ratings', authenticateToken, async (req, res) => {
 app.post('/api/battles/:id/judge', authenticateToken, async (req, res) => {
     try {
         const battleId = req.params.id;
-        const battle = await prisma.battle.findUnique({
+        const battle = await prisma_1.prisma.battle.findUnique({
             where: { id: battleId },
             include: {
                 recordings: {
@@ -1849,7 +2853,7 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req, res) => {
             winner = 'USER2';
         else
             winner = 'DRAW';
-        const judge = await prisma.battleJudge.create({
+        const judge = await prisma_1.prisma.battleJudge.create({
             data: {
                 battleId,
                 judgeType: 'ai',
@@ -1865,7 +2869,7 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req, res) => {
                 confidence: 0.75 + Math.random() * 0.2
             }
         });
-        await prisma.battle.update({
+        await prisma_1.prisma.battle.update({
             where: { id: battleId },
             data: {
                 status: 'FINISHED',
@@ -1874,6 +2878,7 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req, res) => {
                 judgedAt: new Date()
             }
         });
+        await (0, battleEloService_1.applyBattleEloResult)(battleId, winner);
         res.json({
             judge,
             winner,
@@ -1886,12 +2891,23 @@ app.post('/api/battles/:id/judge', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Failed to judge battle' });
     }
 });
+const generateMusicSchema = zod_1.z.object({
+    title: zod_1.z.string().trim().min(1).max(100),
+    tags: zod_1.z.string().trim().min(1).max(1000),
+    prompt: zod_1.z.string().trim().max(5000).optional(),
+    translate_input: zod_1.z.boolean().optional(),
+    model: zod_1.z.literal('v5.5').optional(),
+});
 app.post('/api/generate-music', authenticateToken, async (req, res) => {
     try {
-        const { title, tags, prompt, translate_input, model } = req.body;
-        if (!title || !tags) {
-            return res.status(400).json({ error: 'Title and tags are required' });
+        const parsedRequest = generateMusicSchema.safeParse(req.body);
+        if (!parsedRequest.success) {
+            return res.status(400).json({
+                error: 'Invalid generation parameters',
+                details: parsedRequest.error.issues.map(issue => issue.message),
+            });
         }
+        const { title, tags, prompt, translate_input, model } = parsedRequest.data;
         let tokenBalanceLeft;
         try {
             tokenBalanceLeft = await (0, planService_1.consumeAiGenerationTokens)(req.user.id);
@@ -1907,7 +2923,7 @@ app.post('/api/generate-music', authenticateToken, async (req, res) => {
             title,
             tags,
             ...(prompt && { prompt }),
-            translate_input: translate_input || true,
+            translate_input: translate_input ?? true,
             model: model || 'v5.5'
         };
         const response = await fetch('https://api.gen-api.ru/api/v1/networks/suno', {
@@ -1921,7 +2937,7 @@ app.post('/api/generate-music', authenticateToken, async (req, res) => {
         });
         if (!response.ok) {
             const errorText = await response.text();
-            await prisma.user.update({
+            await prisma_1.prisma.user.update({
                 where: { id: req.user.id },
                 data: { tokenBalance: { increment: plans_1.TOKENS_PER_GENERATION } },
             });
@@ -1932,15 +2948,13 @@ app.post('/api/generate-music', authenticateToken, async (req, res) => {
     }
     catch (error) {
         console.error('Generation error:', error);
-        res.status(500).json({
-            error: error instanceof Error ? error.message : 'Failed to generate music'
-        });
+        res.status(500).json({ error: 'Failed to generate music' });
     }
 });
 app.get('/api/check-generation/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
-        console.log('CHECKING GENERATION ID:', id);
+        debugLog('CHECKING GENERATION ID:', id);
         if (!id) {
             return res.status(400).json({ error: 'Generation ID is required' });
         }
@@ -1949,7 +2963,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req, res) => {
             return res.status(500).json({ error: 'Suno API key not configured' });
         }
         const url = `https://api.gen-api.ru/api/v1/request/get/${id}`;
-        console.log('POLLING URL:', url);
+        debugLog('POLLING URL:', url);
         const response = await fetch(url, {
             method: 'GET',
             headers: {
@@ -1957,14 +2971,14 @@ app.get('/api/check-generation/:id', authenticateToken, async (req, res) => {
                 'Authorization': `Bearer ${apiKey}`
             }
         });
-        console.log('POLLING RESPONSE STATUS:', response.status);
+        debugLog('POLLING RESPONSE STATUS:', response.status);
         if (!response.ok) {
             const errorText = await response.text();
             console.error('POLLING ERROR DETAILS:', errorText);
             throw new Error(`Polling error: ${response.status} - ${errorText}`);
         }
         const data = await response.json();
-        console.log('GENERATION RESPONSE:', data);
+        debugLog('GENERATION RESPONSE keys:', data && typeof data === 'object' ? Object.keys(data) : typeof data);
         res.json(data);
     }
     catch (error) {
@@ -1975,6 +2989,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req, res) => {
     }
 });
 app.get('/api/billing/catalog', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=60');
     res.json({
         plans: plans_1.PLAN_CATALOG,
         tokenPacks: plans_1.TOKEN_PACKS,
@@ -1988,7 +3003,7 @@ app.get('/api/billing/me', authenticateToken, asyncRoute(async (req, res) => {
 }));
 app.post('/api/billing/create-payment', authenticateToken, asyncRoute(async (req, res) => {
     const kind = req.body?.kind;
-    const allowed = ['PLAN_PRO', 'PLAN_PLATINUM', 'TOKENS_400'];
+    const allowed = ['PLAN_PRO', 'PLAN_PLATINUM', 'TOKENS_400', 'TOKENS_800', 'TOKENS_1200', 'TOKENS_2400'];
     if (!allowed.includes(kind)) {
         return res.status(400).json({ error: 'Invalid product kind' });
     }
@@ -2002,7 +3017,6 @@ app.post('/api/billing/create-payment', authenticateToken, asyncRoute(async (req
             kind: kind,
             returnUrl,
         });
-        void (0, emailService_1.sendAdminNotification)('Новый платёж YooKassa', `User: ${req.user.username}\nKind: ${kind}\nAmount: ${created.amountRub} ₽\nPayment: ${created.paymentId}`);
         res.status(201).json(created);
     }
     catch (e) {
@@ -2037,4 +3051,18 @@ httpServer.listen(PORT, HOST, () => {
     console.log(`Server on http://${HOST}:${PORT}`);
     console.log(`WebSocket ready on ws://${HOST}:${PORT}`);
 });
+const shutdown = async (signal) => {
+    console.log(`${signal} received, shutting down…`);
+    httpServer.close(async () => {
+        try {
+            await prisma_1.prisma.$disconnect();
+        }
+        finally {
+            process.exit(0);
+        }
+    });
+    setTimeout(() => process.exit(1), 10000).unref();
+};
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
 //# sourceMappingURL=index.js.map

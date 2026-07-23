@@ -1,8 +1,14 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TOKEN_PACKS = exports.PLAN_CATALOG = exports.TOKENS_PER_GENERATION = void 0;
+exports.TOKEN_PACKS = exports.PLAN_CATALOG = exports.GENERATION_COST_RUB = exports.TOKENS_PER_GENERATION = void 0;
+exports.baseGenerationPriceRub = baseGenerationPriceRub;
+exports.packCompareAtRub = packCompareAtRub;
+exports.packSaveRub = packSaveRub;
+exports.packSavePercent = packSavePercent;
+exports.isTokenPackKind = isTokenPackKind;
 exports.productForKind = productForKind;
 exports.TOKENS_PER_GENERATION = 100;
+exports.GENERATION_COST_RUB = 17;
 exports.PLAN_CATALOG = {
     FREE: {
         id: 'FREE',
@@ -17,7 +23,7 @@ exports.PLAN_CATALOG = {
     PRO: {
         id: 'PRO',
         name: 'Pro',
-        priceRub: 299,
+        priceRub: 249,
         maxCloudProjects: 30,
         maxCloudSavesPerDay: null,
         monthlyTokens: 300,
@@ -27,7 +33,7 @@ exports.PLAN_CATALOG = {
     PLATINUM: {
         id: 'PLATINUM',
         name: 'Platinum',
-        priceRub: 699,
+        priceRub: 499,
         maxCloudProjects: null,
         maxCloudSavesPerDay: 20,
         monthlyTokens: 700,
@@ -42,9 +48,56 @@ exports.TOKEN_PACKS = {
         tokens: 400,
         priceRub: 199,
         generations: 4,
-        description: '400 токенов ≈ 4 AI-генерации. Можно купить в любой момент.',
+        description: 'Старт: 4 генерации. Базовая цена за токен.',
+        badge: null,
+    },
+    TOKENS_800: {
+        id: 'TOKENS_800',
+        name: 'Пакет 800 токенов',
+        tokens: 800,
+        priceRub: 359,
+        generations: 8,
+        description: 'Выгоднее старта: −10% к цене за генерацию.',
+        badge: '−10%',
+    },
+    TOKENS_1200: {
+        id: 'TOKENS_1200',
+        name: 'Пакет 1200 токенов',
+        tokens: 1200,
+        priceRub: 499,
+        generations: 12,
+        description: 'Популярный объём: −16% к цене за генерацию.',
+        badge: '−16%',
+    },
+    TOKENS_2400: {
+        id: 'TOKENS_2400',
+        name: 'Пакет 2400 токенов',
+        tokens: 2400,
+        priceRub: 899,
+        generations: 24,
+        description: 'Максимум выгоды: −25% к цене за генерацию.',
+        badge: '−25%',
     },
 };
+function baseGenerationPriceRub() {
+    const base = exports.TOKEN_PACKS.TOKENS_400;
+    return base.priceRub / base.generations;
+}
+function packCompareAtRub(pack) {
+    return Math.round(baseGenerationPriceRub() * pack.generations);
+}
+function packSaveRub(pack) {
+    return Math.max(0, packCompareAtRub(pack) - pack.priceRub);
+}
+function packSavePercent(pack) {
+    const compare = packCompareAtRub(pack);
+    if (compare <= 0)
+        return 0;
+    return Math.round((packSaveRub(pack) / compare) * 100);
+}
+function isTokenPackKind(kind) {
+    return kind in exports.TOKEN_PACKS;
+}
 function productForKind(kind) {
     if (kind === 'PLAN_PRO') {
         return { kind, amountRub: exports.PLAN_CATALOG.PRO.priceRub, description: `Подписка SoundLab Pro — ${exports.PLAN_CATALOG.PRO.priceRub} ₽ / 30 дней` };
@@ -52,6 +105,7 @@ function productForKind(kind) {
     if (kind === 'PLAN_PLATINUM') {
         return { kind, amountRub: exports.PLAN_CATALOG.PLATINUM.priceRub, description: `Подписка SoundLab Platinum — ${exports.PLAN_CATALOG.PLATINUM.priceRub} ₽ / 30 дней` };
     }
-    return { kind, amountRub: exports.TOKEN_PACKS.TOKENS_400.priceRub, description: `Пакет токенов SoundLab — ${exports.TOKEN_PACKS.TOKENS_400.tokens} шт.` };
+    const pack = exports.TOKEN_PACKS[kind];
+    return { kind, amountRub: pack.priceRub, description: `Пакет токенов SoundLab — ${pack.tokens} шт.` };
 }
 //# sourceMappingURL=plans.js.map

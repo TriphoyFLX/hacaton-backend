@@ -32,6 +32,7 @@ export declare class ChatRepository {
         creatorId: string | null;
     } | null>;
     isChatMember(chatId: string, userId: string): Promise<boolean>;
+    usersShareChat(userId: string, otherUserId: string): Promise<boolean>;
     findDirectChatsBetween(userId1: string, userId2: string): Promise<ChatWithUsers[]>;
     mergeDirectChatDuplicates(duplicates: ChatWithUsers[], preferUserId: string): Promise<ChatWithUsers>;
     mergeAllDuplicateDirectChatsForUser(userId: string): Promise<void>;

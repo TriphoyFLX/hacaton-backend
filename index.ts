@@ -1558,6 +1558,12 @@ const parseAdminPage = (req: { query: Record<string, unknown> }) => {
 
 app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
   const now = new Date();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const since7d = new Date(now.getTime() - 7 * dayMs);
+  const since30d = new Date(now.getTime() - 30 * dayMs);
+  const since14d = new Date(now.getTime() - 14 * dayMs);
+  const abandonedBefore = new Date(now.getTime() - 60 * 60 * 1000);
+
   const [
     usersCount,
     postsCount,
@@ -1574,6 +1580,21 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
     recentPayments,
     recentPresetPurchases,
     openReportsCount,
+    startedAll,
+    succeededAll,
+    canceledAll,
+    uniquePayers,
+    abandonedPending,
+    paymentsSince14d,
+    paymentsByKindAll,
+    started7d,
+    succeeded7d,
+    canceled7d,
+    revenue7d,
+    started30d,
+    succeeded30d,
+    canceled30d,
+    revenue30d,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.post.count(),
@@ -1637,6 +1658,44 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
       },
     }),
     prisma.userReport.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
+    prisma.payment.count(),
+    prisma.payment.count({ where: { status: 'SUCCEEDED' } }),
+    prisma.payment.count({ where: { status: 'CANCELED' } }),
+    prisma.payment.findMany({
+      where: { status: 'SUCCEEDED' },
+      select: { userId: true },
+      distinct: ['userId'],
+    }),
+    prisma.payment.count({
+      where: {
+        status: { in: ['PENDING', 'WAITING_FOR_CAPTURE'] },
+        createdAt: { lt: abandonedBefore },
+      },
+    }),
+    prisma.payment.findMany({
+      where: { createdAt: { gte: since14d } },
+      select: { kind: true, status: true, amountRub: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.payment.groupBy({
+      by: ['kind', 'status'],
+      _count: { _all: true },
+      _sum: { amountRub: true },
+    }),
+    prisma.payment.count({ where: { createdAt: { gte: since7d } } }),
+    prisma.payment.count({ where: { status: 'SUCCEEDED', createdAt: { gte: since7d } } }),
+    prisma.payment.count({ where: { status: 'CANCELED', createdAt: { gte: since7d } } }),
+    prisma.payment.aggregate({
+      where: { status: 'SUCCEEDED', createdAt: { gte: since7d } },
+      _sum: { amountRub: true },
+    }),
+    prisma.payment.count({ where: { createdAt: { gte: since30d } } }),
+    prisma.payment.count({ where: { status: 'SUCCEEDED', createdAt: { gte: since30d } } }),
+    prisma.payment.count({ where: { status: 'CANCELED', createdAt: { gte: since30d } } }),
+    prisma.payment.aggregate({
+      where: { status: 'SUCCEEDED', createdAt: { gte: since30d } },
+      _sum: { amountRub: true },
+    }),
   ]);
 
   const subscriptionsCount = subscriptionAgg._count._all;
@@ -1651,6 +1710,55 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
       { count: row._count._all, revenueRub: row._sum.amountRub || 0 },
     ]),
   );
+
+  const pct = (num: number, den: number) =>
+    den > 0 ? Math.round((num / den) * 1000) / 10 : 0;
+
+  const funnelByKind: Record<
+    string,
+    { started: number; paid: number; canceled: number; pending: number; revenueRub: number; conversionPct: number }
+  > = {};
+  for (const row of paymentsByKindAll) {
+    const slot = (funnelByKind[row.kind] ||= {
+      started: 0,
+      paid: 0,
+      canceled: 0,
+      pending: 0,
+      revenueRub: 0,
+      conversionPct: 0,
+    });
+    slot.started += row._count._all;
+    if (row.status === 'SUCCEEDED') {
+      slot.paid += row._count._all;
+      slot.revenueRub += row._sum.amountRub || 0;
+    } else if (row.status === 'CANCELED') {
+      slot.canceled += row._count._all;
+    } else {
+      slot.pending += row._count._all;
+    }
+  }
+  for (const slot of Object.values(funnelByKind)) {
+    slot.conversionPct = pct(slot.paid, slot.started);
+  }
+
+  const dailyMap = new Map<string, { date: string; clicked: number; paid: number; canceled: number; revenueRub: number }>();
+  for (let i = 13; i >= 0; i -= 1) {
+    const d = new Date(now.getTime() - i * dayMs);
+    const key = d.toISOString().slice(0, 10);
+    dailyMap.set(key, { date: key, clicked: 0, paid: 0, canceled: 0, revenueRub: 0 });
+  }
+  for (const p of paymentsSince14d) {
+    const key = p.createdAt.toISOString().slice(0, 10);
+    const slot = dailyMap.get(key);
+    if (!slot) continue;
+    slot.clicked += 1;
+    if (p.status === 'SUCCEEDED') {
+      slot.paid += 1;
+      slot.revenueRub += p.amountRub;
+    } else if (p.status === 'CANCELED') {
+      slot.canceled += 1;
+    }
+  }
 
   res.json({
     totals: {
@@ -1679,6 +1787,34 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
         paymentsRevenueRub + Math.round((presetRevenue._sum.amountCents || 0) / 100),
     },
     byKind,
+    funnel: {
+      clicked: startedAll,
+      pending: pendingPayments,
+      paid: succeededAll,
+      canceled: canceledAll,
+      abandonedPending,
+      conversionPct: pct(succeededAll, startedAll),
+      cancelPct: pct(canceledAll, startedAll),
+      uniquePayers: uniquePayers.length,
+      avgTicketRub:
+        succeededAll > 0 ? Math.round(paymentsRevenueRub / succeededAll) : 0,
+      last7d: {
+        clicked: started7d,
+        paid: succeeded7d,
+        canceled: canceled7d,
+        revenueRub: revenue7d._sum.amountRub || 0,
+        conversionPct: pct(succeeded7d, started7d),
+      },
+      last30d: {
+        clicked: started30d,
+        paid: succeeded30d,
+        canceled: canceled30d,
+        revenueRub: revenue30d._sum.amountRub || 0,
+        conversionPct: pct(succeeded30d, started30d),
+      },
+      byKind: funnelByKind,
+      daily: Array.from(dailyMap.values()),
+    },
     recent: {
       payments: recentPayments,
       presetPurchases: recentPresetPurchases,
@@ -1691,7 +1827,11 @@ app.get('/api/admin/payments', requireAdmin, asyncRoute(async (req, res) => {
   const kind = typeof req.query.kind === 'string' ? req.query.kind : '';
   const status = typeof req.query.status === 'string' ? req.query.status : 'SUCCEEDED';
   const where: Record<string, unknown> = {};
-  if (status && status !== 'ALL') where.status = status;
+  if (status === 'PENDING') {
+    where.status = { in: ['PENDING', 'WAITING_FOR_CAPTURE'] };
+  } else if (status && status !== 'ALL') {
+    where.status = status;
+  }
   if (kind === 'subscriptions') where.kind = { in: ['PLAN_PRO', 'PLAN_PLATINUM'] };
   else if (kind === 'tokens') where.kind = { in: ['TOKENS_400', 'TOKENS_800', 'TOKENS_1200', 'TOKENS_2400'] };
   else if (kind) where.kind = kind;
@@ -3263,10 +3403,7 @@ app.post('/api/billing/create-payment', authenticateToken, asyncRoute(async (req
       kind: kind as any,
       returnUrl,
     });
-    void sendAdminNotification(
-      'Новый платёж YooKassa',
-      `User: ${req.user!.username}\nKind: ${kind}\nAmount: ${created.amountRub} ₽\nPayment: ${created.paymentId}`,
-    );
+    // Email only after real success (webhook / sync) — click = funnel metric in admin.
     res.status(201).json(created);
   } catch (e: any) {
     res.status(e.status || 500).json({ error: e.message, details: e.details });

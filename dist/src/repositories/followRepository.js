@@ -1,23 +1,22 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.followRepository = exports.FollowRepository = void 0;
-const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
+const prisma_1 = require("../lib/prisma");
 class FollowRepository {
     async follow(followerId, followingId) {
-        return prisma.follow.create({
+        return prisma_1.prisma.follow.create({
             data: { followerId, followingId },
         });
     }
     async unfollow(followerId, followingId) {
-        return prisma.follow.delete({
+        return prisma_1.prisma.follow.delete({
             where: {
                 followerId_followingId: { followerId, followingId },
             },
         });
     }
     async isFollowing(followerId, followingId) {
-        const row = await prisma.follow.findUnique({
+        const row = await prisma_1.prisma.follow.findUnique({
             where: {
                 followerId_followingId: { followerId, followingId },
             },
@@ -25,20 +24,20 @@ class FollowRepository {
         return !!row;
     }
     async getFollowingIds(followerId) {
-        const rows = await prisma.follow.findMany({
+        const rows = await prisma_1.prisma.follow.findMany({
             where: { followerId },
             select: { followingId: true },
         });
         return rows.map((r) => r.followingId);
     }
     async getFollowersCount(userId) {
-        return prisma.follow.count({ where: { followingId: userId } });
+        return prisma_1.prisma.follow.count({ where: { followingId: userId } });
     }
     async getFollowingCount(userId) {
-        return prisma.follow.count({ where: { followerId: userId } });
+        return prisma_1.prisma.follow.count({ where: { followerId: userId } });
     }
     async getFollowers(userId, limit = 50, offset = 0) {
-        const rows = await prisma.follow.findMany({
+        const rows = await prisma_1.prisma.follow.findMany({
             where: { followingId: userId },
             include: {
                 follower: {
@@ -63,7 +62,7 @@ class FollowRepository {
         }));
     }
     async getFollowing(userId, limit = 50, offset = 0) {
-        const rows = await prisma.follow.findMany({
+        const rows = await prisma_1.prisma.follow.findMany({
             where: { followerId: userId },
             include: {
                 following: {

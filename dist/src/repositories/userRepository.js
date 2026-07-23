@@ -4,12 +4,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.userRepository = exports.UserRepository = void 0;
-const client_1 = require("@prisma/client");
+const prisma_1 = require("../lib/prisma");
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
-const prisma = new client_1.PrismaClient();
 class UserRepository {
     async getUserById(id) {
-        const user = await prisma.user.findUnique({
+        const user = await prisma_1.prisma.user.findUnique({
             where: { id },
             select: {
                 id: true,
@@ -22,12 +21,16 @@ class UserRepository {
                 role: true,
                 createdAt: true,
                 updatedAt: true,
+                battleElo: true,
+                battleWins: true,
+                battleLosses: true,
+                battleDraws: true,
             },
         });
         return user;
     }
     async getUserByEmail(email) {
-        return prisma.user.findUnique({
+        return prisma_1.prisma.user.findUnique({
             where: { email },
             select: {
                 id: true,
@@ -53,7 +56,7 @@ class UserRepository {
         if (data.avatar !== undefined) {
             updateData.avatar = data.avatar;
         }
-        const user = await prisma.user.update({
+        const user = await prisma_1.prisma.user.update({
             where: { id: userId },
             data: updateData,
             select: {
@@ -73,7 +76,7 @@ class UserRepository {
     }
     async updatePassword(userId, newPassword) {
         const hashedPassword = await bcryptjs_1.default.hash(newPassword, 10);
-        await prisma.user.update({
+        await prisma_1.prisma.user.update({
             where: { id: userId },
             data: { password: hashedPassword },
         });
@@ -83,11 +86,11 @@ class UserRepository {
         if (excludeUserId) {
             where.id = { not: excludeUserId };
         }
-        const count = await prisma.user.count({ where });
+        const count = await prisma_1.prisma.user.count({ where });
         return count > 0;
     }
     async getUserByUsername(username) {
-        return prisma.user.findFirst({
+        return prisma_1.prisma.user.findFirst({
             where: {
                 username: { equals: username, mode: 'insensitive' },
             },
@@ -102,18 +105,22 @@ class UserRepository {
                 role: true,
                 createdAt: true,
                 updatedAt: true,
+                battleElo: true,
+                battleWins: true,
+                battleLosses: true,
+                battleDraws: true,
             },
         });
     }
     async getUserStats(userId) {
         const [posts, soundToks] = await Promise.all([
-            prisma.post.count({ where: { authorId: userId } }),
-            prisma.soundTok.count({ where: { authorId: userId } }),
+            prisma_1.prisma.post.count({ where: { authorId: userId } }),
+            prisma_1.prisma.soundTok.count({ where: { authorId: userId } }),
         ]);
         return { posts, soundToks };
     }
     async searchUsersForProfile(query, limit = 10) {
-        return prisma.user.findMany({
+        return prisma_1.prisma.user.findMany({
             where: {
                 OR: [
                     { username: { contains: query, mode: 'insensitive' } },
@@ -137,7 +144,7 @@ class UserRepository {
         });
     }
     async searchUsers(query, limit = 10) {
-        return prisma.user.findMany({
+        return prisma_1.prisma.user.findMany({
             where: {
                 OR: [
                     { username: { contains: query, mode: 'insensitive' } },

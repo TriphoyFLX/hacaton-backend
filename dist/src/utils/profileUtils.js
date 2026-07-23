@@ -8,6 +8,7 @@ exports.deleteAvatarFile = deleteAvatarFile;
 exports.serializeProfile = serializeProfile;
 const path_1 = __importDefault(require("path"));
 const fs_1 = __importDefault(require("fs"));
+const battleRating_1 = require("../services/battleRating");
 function getAvatarFilePath(avatarUrl, uploadsDir) {
     const baseDir = uploadsDir ?? path_1.default.join(process.cwd(), 'uploads');
     return path_1.default.join(baseDir, path_1.default.basename(avatarUrl));
@@ -22,6 +23,7 @@ function deleteAvatarFile(avatarUrl, uploadsDir) {
 }
 function serializeProfile(user, options = {}) {
     const isPrivate = options.visibility !== 'public';
+    const rating = (0, battleRating_1.battleRatingPayload)(user);
     const result = {
         id: user.id,
         username: user.username,
@@ -29,6 +31,7 @@ function serializeProfile(user, options = {}) {
         avatar: user.avatar,
         bio: user.bio,
         createdAt: user.createdAt.toISOString(),
+        ...rating,
     };
     if (isPrivate && options.includeEmail && user.email) {
         result.email = user.email;
@@ -36,7 +39,7 @@ function serializeProfile(user, options = {}) {
     if (isPrivate && user.birthDate) {
         result.birthDate = user.birthDate.toISOString();
     }
-    if (isPrivate && user.role) {
+    if (user.role) {
         result.role = user.role;
     }
     if (isPrivate && user.updatedAt) {

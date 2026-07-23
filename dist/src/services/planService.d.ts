@@ -22,7 +22,7 @@ export declare function getBillingSnapshot(userId: string): Promise<EffectivePla
 export declare function assertCanCreateMidiProject(userId: string): Promise<void>;
 export declare function recordMidiCloudSave(userId: string): Promise<void>;
 export declare function consumeAiGenerationTokens(userId: string): Promise<number>;
-export declare function fulfillPayment(paymentId: string): Promise<void>;
+export declare function fulfillPayment(paymentId: string): Promise<boolean>;
 export declare function markPaymentCanceled(paymentId: string): Promise<void>;
 export { PaymentKind, PaymentStatus, PlanTier };
 //# sourceMappingURL=planService.d.ts.map

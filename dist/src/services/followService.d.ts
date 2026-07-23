@@ -4,10 +4,12 @@ export declare class FollowService {
         error: string;
         following?: undefined;
         followersCount?: undefined;
+        created?: undefined;
     } | {
         success: true;
         following: boolean;
         followersCount: number;
+        created: boolean;
         error?: undefined;
     }>;
     unfollow(followerId: string, followingId: string): Promise<{

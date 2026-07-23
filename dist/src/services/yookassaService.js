@@ -8,10 +8,9 @@ exports.createYooKassaPayment = createYooKassaPayment;
 exports.handleYooKassaWebhook = handleYooKassaWebhook;
 exports.syncPaymentStatus = syncPaymentStatus;
 const crypto_1 = __importDefault(require("crypto"));
-const client_1 = require("@prisma/client");
+const prisma_1 = require("../lib/prisma");
 const plans_1 = require("../config/plans");
 const planService_1 = require("./planService");
-const prisma = new client_1.PrismaClient();
 function shopId() {
     return process.env.YOOKASSA_SHOP_ID || '';
 }
@@ -31,7 +30,7 @@ async function createYooKassaPayment(opts) {
         throw err;
     }
     const product = (0, plans_1.productForKind)(opts.kind);
-    const payment = await prisma.payment.create({
+    const payment = await prisma_1.prisma.payment.create({
         data: {
             userId: opts.userId,
             kind: opts.kind,
@@ -70,7 +69,7 @@ async function createYooKassaPayment(opts) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-        await prisma.payment.update({
+        await prisma_1.prisma.payment.update({
             where: { id: payment.id },
             data: { status: 'CANCELED', metadata: { error: data } },
         });
@@ -80,7 +79,7 @@ async function createYooKassaPayment(opts) {
         throw err;
     }
     const confirmationUrl = data?.confirmation?.confirmation_url;
-    await prisma.payment.update({
+    await prisma_1.prisma.payment.update({
         where: { id: payment.id },
         data: {
             yookassaPaymentId: data.id,
@@ -102,14 +101,14 @@ async function handleYooKassaWebhook(notification) {
     const obj = notification?.object;
     if (!obj?.id)
         return;
-    const payment = await prisma.payment.findFirst({
+    const payment = await prisma_1.prisma.payment.findFirst({
         where: { yookassaPaymentId: String(obj.id) },
     });
     if (!payment) {
         const metaId = obj?.metadata?.paymentId;
         if (!metaId)
             return;
-        const byMeta = await prisma.payment.findUnique({ where: { id: String(metaId) } });
+        const byMeta = await prisma_1.prisma.payment.findUnique({ where: { id: String(metaId) } });
         if (!byMeta)
             return;
         if (event === 'payment.succeeded' || obj.status === 'succeeded') {
@@ -128,7 +127,7 @@ async function handleYooKassaWebhook(notification) {
     }
 }
 async function syncPaymentStatus(userId, paymentId) {
-    const payment = await prisma.payment.findFirst({
+    const payment = await prisma_1.prisma.payment.findFirst({
         where: { id: paymentId, userId },
     });
     if (!payment) {
@@ -152,6 +151,6 @@ async function syncPaymentStatus(userId, paymentId) {
     else if (data.status === 'canceled') {
         await (0, planService_1.markPaymentCanceled)(payment.id);
     }
-    return prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
+    return prisma_1.prisma.payment.findUniqueOrThrow({ where: { id: payment.id } });
 }
 //# sourceMappingURL=yookassaService.js.map

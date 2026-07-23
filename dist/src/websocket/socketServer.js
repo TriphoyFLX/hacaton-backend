@@ -11,12 +11,18 @@ const socket_io_1 = require("socket.io");
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const chatService_1 = require("../services/chatService");
 const chatRepository_1 = require("../repositories/chatRepository");
+const messageRepository_1 = require("../repositories/messageRepository");
 const profileService_1 = require("../services/profileService");
 const messageValidation_1 = require("../utils/messageValidation");
 const rateLimiter_1 = require("../utils/rateLimiter");
 const security_1 = require("../middleware/security");
+const notificationService_1 = require("../services/notificationService");
 const userSockets = new Map();
 const activeChatUsers = new Map();
+const MAX_MESSAGE_IDS_PER_READ = 100;
+function isSafeIdentifier(value) {
+    return typeof value === 'string' && value.length > 0 && value.length <= 128;
+}
 let ioInstance = null;
 function getIO() {
     return ioInstance;
@@ -36,8 +42,8 @@ function createSocketServer(httpServer) {
     ioInstance = io;
     io.use(async (socket, next) => {
         try {
-            const token = socket.handshake.auth.token || socket.handshake.query.token;
-            if (!token) {
+            const token = socket.handshake.auth.token;
+            if (typeof token !== 'string' || !token) {
                 return next(new Error('Authentication required'));
             }
             const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
@@ -61,6 +67,7 @@ function createSocketServer(httpServer) {
             userSockets.set(userId, new Set());
         }
         userSockets.get(userId).add(socket.id);
+        socket.join(`user:${userId}`);
         io.to(`user:${userId}`).emit('user:online', { userId, isOnline: true });
         activeChatUsers.forEach((users, chatId) => {
             if (users.has(userId)) {
@@ -73,6 +80,10 @@ function createSocketServer(httpServer) {
         });
         socket.on('chat:join', async (chatId) => {
             try {
+                if (!isSafeIdentifier(chatId)) {
+                    socket.emit('error', { message: 'Invalid chat ID', code: 'INVALID_CHAT' });
+                    return;
+                }
                 const isMember = await chatRepository_1.chatRepository.isChatMember(chatId, userId);
                 if (!isMember) {
                     socket.emit('error', { message: 'Not a member of this chat', code: 'NOT_MEMBER' });
@@ -112,7 +123,12 @@ function createSocketServer(httpServer) {
                 socket.emit('error', { message: 'Failed to join chat', code: 'JOIN_ERROR' });
             }
         });
-        socket.on('chat:leave', (chatId) => {
+        socket.on('chat:leave', async (chatId) => {
+            if (!isSafeIdentifier(chatId) || !socket.rooms.has(`chat:${chatId}`))
+                return;
+            const isMember = await chatRepository_1.chatRepository.isChatMember(chatId, userId);
+            if (!isMember)
+                return;
             socket.leave(`chat:${chatId}`);
             const chatUsers = activeChatUsers.get(chatId);
             if (chatUsers) {
@@ -130,6 +146,10 @@ function createSocketServer(httpServer) {
         });
         socket.on('message:send', async (data, callback) => {
             try {
+                if (!isSafeIdentifier(data.chatId) || !isSafeIdentifier(data.clientMessageId)) {
+                    callback({ success: false, error: 'Invalid message metadata', clientMessageId: data.clientMessageId });
+                    return;
+                }
                 const validation = (0, messageValidation_1.validateMessageContent)(data.content, {
                     allowEmpty: !!data.soundTokId,
                 });
@@ -158,7 +178,7 @@ function createSocketServer(httpServer) {
                     });
                     return;
                 }
-                const clientMessageId = data.clientMessageId || `${userId}_${Date.now()}_${Math.random()}`;
+                const clientMessageId = data.clientMessageId;
                 const result = await chatService_1.chatService.sendMessage({
                     content: validation.content ?? '',
                     senderId: userId,
@@ -178,6 +198,15 @@ function createSocketServer(httpServer) {
                 }
                 const message = result.message;
                 io.to(`chat:${data.chatId}`).emit('message:new', message);
+                if (message.receiverId) {
+                    void notificationService_1.notificationService.create({
+                        userId: message.receiverId,
+                        actorId: userId,
+                        type: 'MESSAGE',
+                        entityType: 'chat',
+                        entityId: data.chatId,
+                    }).catch((error) => console.error('Failed to create message notification:', error));
+                }
                 const chatUsers = activeChatUsers.get(data.chatId);
                 const receiverInChat = data.receiverId ? chatUsers?.has(data.receiverId) : false;
                 if (receiverInChat) {
@@ -205,6 +234,11 @@ function createSocketServer(httpServer) {
         });
         socket.on('message:read', async (data) => {
             try {
+                if (!isSafeIdentifier(data.chatId) || !Array.isArray(data.messageIds)
+                    || data.messageIds.length > MAX_MESSAGE_IDS_PER_READ
+                    || data.messageIds.some((id) => !isSafeIdentifier(id))) {
+                    return;
+                }
                 const result = await chatService_1.chatService.markMessagesAsRead(data.messageIds, userId, data.chatId);
                 if (result.count > 0) {
                     for (const messageId of result.updatedIds) {
@@ -223,7 +257,13 @@ function createSocketServer(httpServer) {
         });
         socket.on('message:deliver', async (data) => {
             try {
-                if (!data.chatId)
+                if (!isSafeIdentifier(data.chatId) || !isSafeIdentifier(data.messageId))
+                    return;
+                const isMember = await chatRepository_1.chatRepository.isChatMember(data.chatId, userId);
+                if (!isMember)
+                    return;
+                const message = await messageRepository_1.messageRepository.getMessageForDelivery(data.messageId, data.chatId);
+                if (!message || message.receiverId !== userId)
                     return;
                 socket.to(`chat:${data.chatId}`).emit('message:delivered', {
                     clientMessageId: '',
@@ -234,14 +274,29 @@ function createSocketServer(httpServer) {
                 console.error('[Socket] Error delivering message:', error);
             }
         });
-        socket.on('chat:typing', (data) => {
+        socket.on('chat:typing', async (data) => {
+            if (!isSafeIdentifier(data.chatId) || typeof data.isTyping !== 'boolean')
+                return;
+            const rateLimit = (0, rateLimiter_1.checkRateLimit)(`typing:${userId}:${data.chatId}`, 20, 10000);
+            if (!rateLimit.allowed)
+                return;
+            const isMember = await chatRepository_1.chatRepository.isChatMember(data.chatId, userId);
+            if (!isMember)
+                return;
             socket.to(`chat:${data.chatId}`).emit('chat:typing', {
                 chatId: data.chatId,
                 userId,
                 isTyping: data.isTyping,
             });
         });
-        socket.on('user:subscribe', (targetUserId) => {
+        socket.on('user:subscribe', async (targetUserId) => {
+            if (!isSafeIdentifier(targetUserId) || targetUserId === userId)
+                return;
+            const sharesChat = await chatRepository_1.chatRepository.usersShareChat(userId, targetUserId);
+            if (!sharesChat) {
+                socket.emit('error', { message: 'Presence access denied', code: 'PRESENCE_DENIED' });
+                return;
+            }
             socket.join(`user:${targetUserId}`);
             socket.emit('user:online', {
                 userId: targetUserId,

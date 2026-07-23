@@ -42,6 +42,10 @@ export declare function findOrCreateOAuthUser(input: {
     tokenBalance: number;
     midiSavesDayKey: string | null;
     midiSavesToday: number;
+    battleElo: number;
+    battleWins: number;
+    battleLosses: number;
+    battleDraws: number;
     createdAt: Date;
     updatedAt: Date;
 }>;

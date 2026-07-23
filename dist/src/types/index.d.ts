@@ -14,6 +14,15 @@ export interface TokenPayload {
 }
 export interface ServerToClientEvents {
     'message:new': (message: MessageWithSender) => void;
+    'message:deleted': (data: {
+        chatId: string;
+        message: MessageWithSender;
+    }) => void;
+    'message:reaction': (data: {
+        chatId: string;
+        message: MessageWithSender;
+    }) => void;
+    'notification:new': (notification: NotificationEvent) => void;
     'message:status': (data: {
         messageId: string;
         status: string;
@@ -41,6 +50,20 @@ export interface ServerToClientEvents {
         message: string;
         code: string;
     }) => void;
+}
+export interface NotificationEvent {
+    id: string;
+    type: 'LIKE' | 'COMMENT' | 'FOLLOW' | 'MESSAGE';
+    entityType: string | null;
+    entityId: string | null;
+    readAt: Date | null;
+    createdAt: Date;
+    actor: {
+        id: string;
+        username: string;
+        displayName?: string | null;
+        avatar?: string | null;
+    };
 }
 export interface ClientToServerEvents {
     'message:send': (data: SendMessageData, callback: (response: MessageResponse) => void) => void;
@@ -79,6 +102,16 @@ export interface SharedSoundTokPreview {
         avatar?: string | null;
     };
 }
+export interface MessageReactionSummary {
+    id: string;
+    emoji: string;
+    userId: string;
+    createdAt: Date;
+    user?: {
+        id: string;
+        username: string;
+    };
+}
 export interface MessageWithSender {
     id: string;
     content: string;
@@ -89,6 +122,7 @@ export interface MessageWithSender {
     clientMessageId?: string | null;
     status: 'SENT' | 'DELIVERED' | 'READ';
     readAt?: Date | null;
+    deletedAt?: Date | null;
     createdAt: Date;
     updatedAt: Date;
     sender: {
@@ -98,6 +132,7 @@ export interface MessageWithSender {
         avatar?: string | null;
     };
     soundTok?: SharedSoundTokPreview | null;
+    reactions?: MessageReactionSummary[];
 }
 export interface SendMessageData {
     content: string;

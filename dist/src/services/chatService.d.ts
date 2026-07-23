@@ -39,6 +39,24 @@ export declare class ChatService {
         updatedIds: string[];
     }>;
     markChatAsDelivered(chatId: string, userId: string): Promise<string[]>;
+    deleteMessage(chatId: string, messageId: string, userId: string): Promise<{
+        success: false;
+        error: string;
+        message?: undefined;
+    } | {
+        success: true;
+        message: MessageWithSender;
+        error?: undefined;
+    }>;
+    toggleReaction(chatId: string, messageId: string, userId: string, emoji: string): Promise<{
+        success: false;
+        error: string;
+    } | {
+        message: MessageWithSender;
+        added: boolean;
+        success: true;
+        error?: undefined;
+    }>;
     getUnreadCounts(userId: string, chatIds: string[]): Promise<Map<string, number>>;
     private validateMessageIds;
 }
