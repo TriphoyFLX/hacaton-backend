@@ -63,6 +63,23 @@ enum PresetPurchaseStatus {
   REFUNDED
 }
 
+enum ReportReason {
+  BULLYING
+  SCAM
+  SPAM
+  HARASSMENT
+  HATE
+  IMPERSONATION
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
 model User {
   id         String    @id @default(cuid())
   email      String    @unique
@@ -131,6 +148,8 @@ model User {
   following Follow[] @relation("UserFollowing")
   blocks    Block[] @relation("UserBlocks")
   blockedBy Block[] @relation("UserBlockedBy")
+  reportsFiled    UserReport[] @relation("ReportsFiled")
+  reportsReceived UserReport[] @relation("ReportsReceived")
 
   @@map("users")
 }
@@ -608,4 +627,25 @@ model Block {
   @@unique([blockerId, blockedId])
   @@index([blockedId])
   @@map("blocks")
+}
+
+model UserReport {
+  id         String       @id @default(cuid())
+  reporterId String
+  reportedId String
+  reason     ReportReason
+  details    String?      @db.Text
+  status     ReportStatus @default(OPEN)
+  adminNote  String?      @db.Text
+  resolvedAt DateTime?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  reporter User @relation("ReportsFiled", fields: [reporterId], references: [id], onDelete: Cascade)
+  reported User @relation("ReportsReceived", fields: [reportedId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([reportedId, status])
+  @@index([reporterId, createdAt])
+  @@map("user_reports")
 }

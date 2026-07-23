@@ -202,6 +202,27 @@ const userPublicSelect = {
   updatedAt: true,
 } as const;
 
+/** Lean author card for feeds / comments — includes role for admin badge. */
+const authorPreviewSelect = {
+  id: true,
+  username: true,
+  displayName: true,
+  avatar: true,
+  role: true,
+} as const;
+
+const REPORT_REASONS = [
+  'BULLYING',
+  'SCAM',
+  'SPAM',
+  'HARASSMENT',
+  'HATE',
+  'IMPERSONATION',
+  'OTHER',
+] as const;
+
+const REPORT_STATUSES = ['OPEN', 'REVIEWING', 'RESOLVED', 'DISMISSED'] as const;
+
 function signAuthToken(userId: string, role?: string) {
   return jwt.sign(
     { userId, ...(role ? { role } : {}) },
@@ -911,14 +932,7 @@ app.get('/api/posts', async (req, res) => {
           createdAt: true,
           updatedAt: true,
           media: { select: { id: true, type: true, url: true, createdAt: true } },
-          author: {
-            select: {
-              id: true,
-              username: true,
-              displayName: true,
-              avatar: true,
-            },
-          },
+          author: { select: authorPreviewSelect },
           likesList: userId
             ? {
                 where: { userId },
@@ -962,7 +976,7 @@ app.get('/api/posts/:id', async (req, res) => {
       where: { id: req.params.id },
       include: {
         media: true,
-        author: { select: { id: true, username: true, displayName: true, avatar: true } },
+        author: { select: authorPreviewSelect },
         likesList: userId ? { where: { userId }, select: { id: true } } : false,
       },
     });
@@ -1025,7 +1039,7 @@ app.get('/api/posts/:id/comments', async (req, res) => {
   try {
     const comments = await prisma.postComment.findMany({
       where: { postId: req.params.id },
-      include: { author: { select: { id: true, username: true, displayName: true, avatar: true } } },
+      include: { author: { select: authorPreviewSelect } },
       orderBy: { createdAt: 'asc' },
       take: 100,
     });
@@ -1048,7 +1062,7 @@ app.post('/api/posts/:id/comments', async (req, res) => {
     const [comment, updated] = await prisma.$transaction([
       prisma.postComment.create({
         data: { text: validation.content, authorId: userId, postId: post.id },
-        include: { author: { select: { id: true, username: true, displayName: true, avatar: true } } },
+        include: { author: { select: authorPreviewSelect } },
       }),
       prisma.post.update({ where: { id: post.id }, data: { commentsCount: { increment: 1 } }, select: { commentsCount: true } }),
     ]);
@@ -1226,14 +1240,7 @@ app.get('/api/soundtok', async (req, res) => {
           commentsCount: true,
           createdAt: true,
           updatedAt: true,
-          author: {
-            select: {
-              id: true,
-              username: true,
-              displayName: true,
-              avatar: true,
-            },
-          },
+          author: { select: authorPreviewSelect },
           likesList: userId
             ? {
                 where: { userId },
@@ -1566,6 +1573,7 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
     pendingPayments,
     recentPayments,
     recentPresetPurchases,
+    openReportsCount,
   ] = await Promise.all([
     prisma.user.count(),
     prisma.post.count(),
@@ -1628,6 +1636,7 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
         preset: { select: { id: true, title: true } },
       },
     }),
+    prisma.userReport.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
   ]);
 
   const subscriptionsCount = subscriptionAgg._count._all;
@@ -1650,6 +1659,7 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
       soundToks: soundToksCount,
       presetsPublished,
       pendingPayments,
+      openReports: openReportsCount,
     },
     plans: {
       activePro,
@@ -1874,6 +1884,163 @@ app.delete('/api/admin/soundtoks/:id', requireAdmin, async (req, res) => {
     res.status(500).json({ error: 'Failed to delete soundtok' });
   }
 });
+
+const reportUserSelect = {
+  id: true,
+  username: true,
+  displayName: true,
+  avatar: true,
+  role: true,
+  email: true,
+} as const;
+
+app.post('/api/reports', authenticateToken, asyncRoute(async (req, res) => {
+  const reportedUserId = typeof req.body?.reportedUserId === 'string' ? req.body.reportedUserId.trim() : '';
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().toUpperCase() : '';
+  const detailsRaw = typeof req.body?.details === 'string' ? req.body.details.trim() : '';
+  const details = detailsRaw.slice(0, 1000) || null;
+
+  if (!reportedUserId) {
+    return res.status(400).json({ error: 'reportedUserId required' });
+  }
+  if (!(REPORT_REASONS as readonly string[]).includes(reason)) {
+    return res.status(400).json({ error: 'Invalid reason', allowed: REPORT_REASONS });
+  }
+  if (reportedUserId === req.user!.id) {
+    return res.status(400).json({ error: 'Cannot report yourself' });
+  }
+
+  const target = await prisma.user.findUnique({
+    where: { id: reportedUserId },
+    select: { id: true, username: true, role: true },
+  });
+  if (!target) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  if (target.role === 'ADMIN') {
+    return res.status(400).json({ error: 'Cannot report an admin account' });
+  }
+
+  const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  const recentCount = await prisma.userReport.count({
+    where: { reporterId: req.user!.id, createdAt: { gte: hourAgo } },
+  });
+  if (recentCount >= 5) {
+    return res.status(429).json({ error: 'Too many reports. Try again later.' });
+  }
+
+  const openDuplicate = await prisma.userReport.findFirst({
+    where: {
+      reporterId: req.user!.id,
+      reportedId: reportedUserId,
+      status: { in: ['OPEN', 'REVIEWING'] },
+    },
+    select: { id: true },
+  });
+  if (openDuplicate) {
+    return res.status(409).json({ error: 'You already have an open report against this user', reportId: openDuplicate.id });
+  }
+
+  const report = await prisma.userReport.create({
+    data: {
+      reporterId: req.user!.id,
+      reportedId: reportedUserId,
+      reason: reason as (typeof REPORT_REASONS)[number],
+      details,
+    },
+    select: {
+      id: true,
+      reason: true,
+      status: true,
+      details: true,
+      createdAt: true,
+      reported: { select: { id: true, username: true } },
+    },
+  });
+
+  void sendAdminNotification(
+    'Новая жалоба на пользователя',
+    `Reporter: @${req.user!.username}\nReported: @${target.username}\nReason: ${reason}\nDetails: ${details || '—'}`,
+  );
+
+  res.status(201).json({ report });
+}));
+
+app.get('/api/admin/reports', requireAdmin, asyncRoute(async (req, res) => {
+  const { take, skip } = parseAdminPage(req);
+  const status = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : 'OPEN';
+  const where =
+    status && status !== 'ALL' && (REPORT_STATUSES as readonly string[]).includes(status)
+      ? { status: status as (typeof REPORT_STATUSES)[number] }
+      : {};
+
+  const [items, total, openCount] = await Promise.all([
+    prisma.userReport.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take,
+      skip,
+      select: {
+        id: true,
+        reason: true,
+        details: true,
+        status: true,
+        adminNote: true,
+        resolvedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        reporter: { select: reportUserSelect },
+        reported: { select: reportUserSelect },
+      },
+    }),
+    prisma.userReport.count({ where }),
+    prisma.userReport.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
+  ]);
+
+  res.json({ items, total, openCount, limit: take, offset: skip });
+}));
+
+app.patch('/api/admin/reports/:id', requireAdmin, asyncRoute(async (req, res) => {
+  const status = typeof req.body?.status === 'string' ? req.body.status.trim().toUpperCase() : '';
+  const adminNote =
+    typeof req.body?.adminNote === 'string' ? req.body.adminNote.trim().slice(0, 1000) : undefined;
+
+  if (status && !(REPORT_STATUSES as readonly string[]).includes(status)) {
+    return res.status(400).json({ error: 'Invalid status', allowed: REPORT_STATUSES });
+  }
+
+  const existing = await prisma.userReport.findUnique({ where: { id: req.params.id }, select: { id: true } });
+  if (!existing) {
+    return res.status(404).json({ error: 'Report not found' });
+  }
+
+  const updated = await prisma.userReport.update({
+    where: { id: req.params.id },
+    data: {
+      ...(status ? { status: status as (typeof REPORT_STATUSES)[number] } : {}),
+      ...(adminNote !== undefined ? { adminNote: adminNote || null } : {}),
+      ...((status === 'RESOLVED' || status === 'DISMISSED')
+        ? { resolvedAt: new Date() }
+        : status === 'OPEN' || status === 'REVIEWING'
+          ? { resolvedAt: null }
+          : {}),
+    },
+    select: {
+      id: true,
+      reason: true,
+      details: true,
+      status: true,
+      adminNote: true,
+      resolvedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      reporter: { select: reportUserSelect },
+      reported: { select: reportUserSelect },
+    },
+  });
+
+  res.json({ report: updated });
+}));
 
 app.get('/api/users/:userId/presence', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {

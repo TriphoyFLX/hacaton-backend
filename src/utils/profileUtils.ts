@@ -92,7 +92,7 @@ export function serializeProfile(
     result.birthDate = user.birthDate.toISOString();
   }
 
-  if (isPrivate && user.role) {
+  if (user.role) {
     result.role = user.role;
   }
 
