@@ -71,15 +71,7 @@ export async function getUnreadTotal(req: AuthenticatedRequest, res: Response) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    // Lightweight membership ids only — avoid loading full chat payloads
-    const memberships = await chatRepository.getChatIdsForUser(req.user.id);
-    const unreadCounts = await chatService.getUnreadCounts(req.user.id, memberships);
-
-    let total = 0;
-    unreadCounts.forEach((count) => {
-      total += count;
-    });
-
+    const total = await chatService.getUnreadTotal(req.user.id);
     res.json({ total });
   } catch (error) {
     console.error('getUnreadTotal error:', error);

@@ -416,6 +416,10 @@ const REPORT_REASONS = [
 ] as const;
 
 const REPORT_STATUSES = ['OPEN', 'REVIEWING', 'RESOLVED', 'DISMISSED'] as const;
+const REPORT_REASONS_REQUIRING_DETAILS = new Set<(typeof REPORT_REASONS)[number]>([
+  'SCAM',
+  'OTHER',
+]);
 
 function signAuthToken(userId: string, role?: string) {
   const expiresIn = (process.env.JWT_EXPIRES_IN || '7d') as jwt.SignOptions['expiresIn'];
@@ -1218,6 +1222,16 @@ app.use('/api/follows', createFollowRouter(authenticateToken));
 app.use('/api/chats', createChatRouter(authenticateToken, uploadsDir));
 app.use('/api/blocks', createBlockRouter(authenticateToken));
 app.use('/api/presets', createPresetRouter(prisma, authenticateToken, uploadsDir, privatePresetsDir));
+
+app.get('/api/notifications/unread-count', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const unreadCount = await notificationService.unreadCount(req.user!.id);
+    res.json({ unreadCount });
+  } catch (error) {
+    console.error('Failed to fetch notification unread count:', error);
+    res.status(500).json({ error: 'Failed to fetch notification unread count' });
+  }
+});
 
 app.get('/api/notifications', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
@@ -2971,13 +2985,19 @@ app.post('/api/reports', authenticateToken, asyncRoute(async (req, res) => {
   const details = detailsRaw.slice(0, 1000) || null;
 
   if (!reportedUserId) {
-    return res.status(400).json({ error: 'reportedUserId required' });
+    return res.status(400).json({ error: 'Укажите пользователя' });
   }
   if (!(REPORT_REASONS as readonly string[]).includes(reason)) {
-    return res.status(400).json({ error: 'Invalid reason', allowed: REPORT_REASONS });
+    return res.status(400).json({ error: 'Некорректная причина', allowed: REPORT_REASONS });
   }
   if (reportedUserId === req.user!.id) {
     return res.status(400).json({ error: 'Cannot report yourself' });
+  }
+  if (
+    REPORT_REASONS_REQUIRING_DETAILS.has(reason as (typeof REPORT_REASONS)[number]) &&
+    (!details || details.length < 12)
+  ) {
+    return res.status(400).json({ error: 'Details required for this reason' });
   }
 
   const target = await prisma.user.findUnique({
@@ -2985,7 +3005,7 @@ app.post('/api/reports', authenticateToken, asyncRoute(async (req, res) => {
     select: { id: true, username: true, role: true },
   });
   if (!target) {
-    return res.status(404).json({ error: 'User not found' });
+    return res.status(404).json({ error: 'Пользователь не найден' });
   }
   if (target.role === 'ADMIN') {
     return res.status(400).json({ error: 'Cannot report an admin account' });
@@ -3008,7 +3028,10 @@ app.post('/api/reports', authenticateToken, asyncRoute(async (req, res) => {
     select: { id: true },
   });
   if (openDuplicate) {
-    return res.status(409).json({ error: 'You already have an open report against this user', reportId: openDuplicate.id });
+    return res.status(409).json({
+      error: 'You already have an open report against this user',
+      reportId: openDuplicate.id,
+    });
   }
 
   const report = await prisma.userReport.create({
@@ -3039,10 +3062,23 @@ app.post('/api/reports', authenticateToken, asyncRoute(async (req, res) => {
 app.get('/api/admin/reports', requireAdmin, asyncRoute(async (req, res) => {
   const { take, skip } = parseAdminPage(req);
   const status = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : 'OPEN';
-  const where =
-    status && status !== 'ALL' && (REPORT_STATUSES as readonly string[]).includes(status)
-      ? { status: status as (typeof REPORT_STATUSES)[number] }
-      : {};
+  const reason = typeof req.query.reason === 'string' ? req.query.reason.trim().toUpperCase() : '';
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
+
+  const where: Record<string, unknown> = {};
+  if (status && status !== 'ALL' && (REPORT_STATUSES as readonly string[]).includes(status)) {
+    where.status = status as (typeof REPORT_STATUSES)[number];
+  }
+  if (reason && (REPORT_REASONS as readonly string[]).includes(reason)) {
+    where.reason = reason as (typeof REPORT_REASONS)[number];
+  }
+  if (q) {
+    where.OR = [
+      { reporter: { username: { contains: q, mode: 'insensitive' } } },
+      { reported: { username: { contains: q, mode: 'insensitive' } } },
+      { details: { contains: q, mode: 'insensitive' } },
+    ];
+  }
 
   const [items, total, openCount] = await Promise.all([
     prisma.userReport.findMany({
@@ -3067,7 +3103,32 @@ app.get('/api/admin/reports', requireAdmin, asyncRoute(async (req, res) => {
     prisma.userReport.count({ where: { status: { in: ['OPEN', 'REVIEWING'] } } }),
   ]);
 
-  res.json({ items, total, openCount, limit: take, offset: skip });
+  const reportedIds = [...new Set(items.map((item) => item.reported.id))];
+  const openAgainstRows =
+    reportedIds.length > 0
+      ? await prisma.userReport.groupBy({
+          by: ['reportedId'],
+          where: {
+            reportedId: { in: reportedIds },
+            status: { in: ['OPEN', 'REVIEWING'] },
+          },
+          _count: { _all: true },
+        })
+      : [];
+  const openAgainstMap = new Map(
+    openAgainstRows.map((row) => [row.reportedId, row._count._all]),
+  );
+
+  res.json({
+    items: items.map((item) => ({
+      ...item,
+      openAgainstReported: openAgainstMap.get(item.reported.id) || 0,
+    })),
+    total,
+    openCount,
+    limit: take,
+    offset: skip,
+  });
 }));
 
 app.patch('/api/admin/reports/:id', requireAdmin, asyncRoute(async (req, res) => {

@@ -61,6 +61,10 @@ export const notificationService = {
     return { items, unreadCount };
   },
 
+  async unreadCount(userId: string) {
+    return prisma.notification.count({ where: { userId, readAt: null } });
+  },
+
   async markRead(userId: string, ids?: string[]) {
     const where = ids?.length
       ? { userId, id: { in: ids } }

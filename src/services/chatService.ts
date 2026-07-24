@@ -12,6 +12,8 @@ import { validateMessageContent } from '../utils/messageValidation';
 const MAX_GROUP_MEMBERS = 100;
 const MAX_GROUP_NAME_LENGTH = 120;
 const CHAT_IMAGE_PATH_RE = /^\/uploads\/[A-Za-z0-9._-]+$/;
+const UNREAD_TOTAL_CACHE_MS = 20_000;
+const unreadTotalCache = new Map<string, { total: number; at: number }>();
 
 /** Must match multer destination from index.ts (`__dirname/uploads`). */
 let configuredUploadsDir = path.join(process.cwd(), 'uploads');
@@ -173,6 +175,8 @@ export class ChatService {
       }
 
       await chatRepository.updateTimestamp(data.chatId);
+      this.invalidateUnreadTotalCache(data.senderId);
+      if (receiverId) this.invalidateUnreadTotalCache(receiverId);
 
       return { success: true, message };
     } catch (error) {
@@ -285,6 +289,7 @@ export class ChatService {
     }
 
     await chatRepository.updateLastReadAt(chatId, userId);
+    this.invalidateUnreadTotalCache(userId);
 
     const chatMeta = await chatRepository.getChatMeta(chatId);
     if (chatMeta?.type === ChatType.GROUP) {
@@ -407,6 +412,70 @@ export class ChatService {
     }
 
     return counts;
+  }
+
+  /** Fast badge total with short per-user cache (sidebar polling). */
+  async getUnreadTotal(userId: string): Promise<number> {
+    const cached = unreadTotalCache.get(userId);
+    const now = Date.now();
+    if (cached && now - cached.at < UNREAD_TOTAL_CACHE_MS) {
+      return cached.total;
+    }
+
+    const memberships = await prisma.chatUser.findMany({
+      where: { userId },
+      select: {
+        chatId: true,
+        lastReadAt: true,
+        chat: { select: { type: true } },
+      },
+    });
+
+    const directIds: string[] = [];
+    const groupMeta: Array<{ chatId: string; lastReadAt: Date | null }> = [];
+    for (const row of memberships) {
+      if (row.chat.type === 'GROUP') {
+        groupMeta.push({ chatId: row.chatId, lastReadAt: row.lastReadAt ?? null });
+      } else {
+        directIds.push(row.chatId);
+      }
+    }
+
+    let total = 0;
+
+    if (directIds.length > 0) {
+      total += await prisma.message.count({
+        where: {
+          chatId: { in: directIds },
+          receiverId: userId,
+          deletedAt: null,
+          status: { in: [MessageStatus.SENT, MessageStatus.DELIVERED] },
+        },
+      });
+    }
+
+    if (groupMeta.length > 0) {
+      const groupCounts = await Promise.all(
+        groupMeta.map(({ chatId, lastReadAt }) =>
+          prisma.message.count({
+            where: {
+              chatId,
+              senderId: { not: userId },
+              deletedAt: null,
+              createdAt: { gt: lastReadAt ?? new Date(0) },
+            },
+          }),
+        ),
+      );
+      for (const count of groupCounts) total += count;
+    }
+
+    unreadTotalCache.set(userId, { total, at: now });
+    return total;
+  }
+
+  invalidateUnreadTotalCache(userId: string) {
+    unreadTotalCache.delete(userId);
   }
 
   async updateGroupAvatar(
