@@ -1649,7 +1649,16 @@ const parseAdminPage = (req: { query: Record<string, unknown> }) => {
   return { take, skip, q };
 };
 
-app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
+const ADMIN_STATS_CACHE_TTL_MS = 30_000;
+let adminStatsCache: { expiresAt: number; value: unknown } | null = null;
+
+app.get('/api/admin/stats', requireAdmin, asyncRoute(async (req, res) => {
+  const forceRefresh = req.query.refresh === '1';
+  if (!forceRefresh && adminStatsCache && adminStatsCache.expiresAt > Date.now()) {
+    res.setHeader('X-Admin-Stats-Cache', 'HIT');
+    return res.json(adminStatsCache.value);
+  }
+
   const now = new Date();
   const dayMs = 24 * 60 * 60 * 1000;
   const since7d = new Date(now.getTime() - 7 * dayMs);
@@ -1853,7 +1862,7 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
     }
   }
 
-  res.json({
+  const response = {
     totals: {
       users: usersCount,
       posts: postsCount,
@@ -1912,7 +1921,13 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
       payments: recentPayments,
       presetPurchases: recentPresetPurchases,
     },
-  });
+  };
+  adminStatsCache = {
+    expiresAt: Date.now() + ADMIN_STATS_CACHE_TTL_MS,
+    value: response,
+  };
+  res.setHeader('X-Admin-Stats-Cache', 'MISS');
+  res.json(response);
 }));
 
 app.get('/api/admin/payments', requireAdmin, asyncRoute(async (req, res) => {
