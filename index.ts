@@ -1876,11 +1876,16 @@ app.get('/api/search', async (req, res) => {
         where: {
           OR: [
             { username: { contains: q, mode: 'insensitive' } },
+            { displayName: { contains: q, mode: 'insensitive' } },
+            { usernameHistory: { some: { username: { contains: q, mode: 'insensitive' } } } },
           ]
         },
         select: {
           id: true,
           username: true,
+          displayName: true,
+          avatar: true,
+          bio: true,
           createdAt: true
         },
         take: 10
@@ -2293,14 +2298,19 @@ app.get('/api/admin/preset-purchases', requireAdmin, asyncRoute(async (req, res)
 
 app.get('/api/admin/users', requireAdmin, asyncRoute(async (req, res) => {
   const { take, skip, q } = parseAdminPage(req);
-  const where = q
-    ? {
-        OR: [
-          { username: { contains: q, mode: 'insensitive' as const } },
-          { email: { contains: q, mode: 'insensitive' as const } },
-        ],
-      }
-    : {};
+  const roleRaw = typeof req.query.role === 'string' ? req.query.role.trim().toUpperCase() : '';
+  const roleFilter = roleRaw === 'ADMIN' || roleRaw === 'USER' ? roleRaw : null;
+  const where = {
+    ...(roleFilter ? { role: roleFilter as 'ADMIN' | 'USER' } : {}),
+    ...(q
+      ? {
+          OR: [
+            { username: { contains: q, mode: 'insensitive' as const } },
+            { email: { contains: q, mode: 'insensitive' as const } },
+          ],
+        }
+      : {}),
+  };
   const [items, total] = await Promise.all([
     prisma.user.findMany({
       where,

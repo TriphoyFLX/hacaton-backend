@@ -417,6 +417,31 @@ export class ChatRepository {
     });
     return otherUser?.userId || null;
   }
+
+  /** Chat rooms + peer user rooms to notify about profile changes. */
+  async getProfileBroadcastTargets(userId: string): Promise<{ chatIds: string[]; peerIds: string[] }> {
+    const memberships = await prisma.chatUser.findMany({
+      where: { userId },
+      select: { chatId: true },
+    });
+    const chatIds = memberships.map((m) => m.chatId);
+    if (chatIds.length === 0) {
+      return { chatIds: [], peerIds: [] };
+    }
+
+    const peers = await prisma.chatUser.findMany({
+      where: {
+        chatId: { in: chatIds },
+        userId: { not: userId },
+      },
+      select: { userId: true },
+    });
+
+    return {
+      chatIds,
+      peerIds: [...new Set(peers.map((p) => p.userId))],
+    };
+  }
 }
 
 export const chatRepository = new ChatRepository();

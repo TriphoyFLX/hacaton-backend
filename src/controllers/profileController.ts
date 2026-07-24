@@ -4,6 +4,8 @@ import { profileService } from '../services/profileService';
 import { userRepository } from '../repositories/userRepository';
 import { AuthenticatedRequest } from '../types';
 import { deleteAvatarFile, serializeProfile } from '../utils/profileUtils';
+import { getIO } from '../websocket/socketServer';
+import { chatRepository } from '../repositories/chatRepository';
 
 export function createProfileHandlers(uploadsDir: string) {
   async function getMyProfile(req: AuthenticatedRequest, res: Response) {
@@ -74,6 +76,26 @@ export function createProfileHandlers(uploadsDir: string) {
           errors: result.errors,
           error: result.error,
         });
+      }
+
+      if (result.user) {
+        const payload = {
+          id: result.user.id,
+          username: result.user.username,
+          displayName: result.user.displayName ?? null,
+          avatar: result.user.avatar ?? null,
+        };
+        const io = getIO();
+        if (io) {
+          io.to(`user:${req.user.id}`).emit('user:updated', payload);
+          const { chatIds, peerIds } = await chatRepository.getProfileBroadcastTargets(req.user.id);
+          for (const chatId of chatIds) {
+            io.to(`chat:${chatId}`).emit('user:updated', payload);
+          }
+          for (const peerId of peerIds) {
+            io.to(`user:${peerId}`).emit('user:updated', payload);
+          }
+        }
       }
 
       res.json({
