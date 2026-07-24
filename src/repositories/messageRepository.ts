@@ -137,7 +137,31 @@ export class MessageRepository {
 
     const updated = await prisma.message.update({
       where: { id: messageId },
-      data: { deletedAt: new Date(), content: '', soundTokId: null },
+      data: { deletedAt: new Date(), content: '', soundTokId: null, editedAt: null },
+      include: messageInclude,
+    });
+    return sanitizeMessage(updated as MessageWithSender);
+  }
+
+  async editMessage(
+    messageId: string,
+    senderId: string,
+    chatId: string,
+    content: string,
+  ): Promise<MessageWithSender | null> {
+    const existing = await prisma.message.findFirst({
+      where: { id: messageId, chatId, senderId, deletedAt: null },
+      select: { id: true, soundTokId: true },
+    });
+    if (!existing) return null;
+    if (!content && !existing.soundTokId) return null;
+
+    const updated = await prisma.message.update({
+      where: { id: messageId },
+      data: {
+        content,
+        editedAt: new Date(),
+      },
       include: messageInclude,
     });
     return sanitizeMessage(updated as MessageWithSender);

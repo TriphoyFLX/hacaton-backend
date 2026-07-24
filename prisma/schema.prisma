@@ -462,6 +462,7 @@ model Message {
   status      MessageStatus @default(SENT)
   readAt      DateTime?
   deletedAt   DateTime?
+  editedAt    DateTime?
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

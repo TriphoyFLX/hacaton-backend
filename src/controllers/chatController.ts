@@ -340,6 +340,26 @@ export async function deleteMessage(req: AuthenticatedRequest, res: Response) {
   }
 }
 
+export async function editMessage(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId, messageId } = req.params;
+    const result = await chatService.editMessage(chatId, messageId, req.user.id, req.body?.content);
+    if (!result.success || !result.message) {
+      const status =
+        result.error === 'Access denied' ? 403
+        : result.error === 'Message not found or empty' ? 404
+        : 400;
+      return res.status(status).json({ error: result.error || 'Failed to edit message' });
+    }
+    getIO()?.to(`chat:${chatId}`).emit('message:edited', { chatId, message: result.message });
+    res.json(result.message);
+  } catch (error) {
+    console.error('editMessage error:', error);
+    res.status(500).json({ error: 'Failed to edit message' });
+  }
+}
+
 export async function toggleMessageReaction(req: AuthenticatedRequest, res: Response) {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });

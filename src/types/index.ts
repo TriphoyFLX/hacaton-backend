@@ -100,6 +100,7 @@ export interface MessageWithSender {
   status: 'SENT' | 'DELIVERED' | 'READ';
   readAt?: Date | null;
   deletedAt?: Date | null;
+  editedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
   sender: {

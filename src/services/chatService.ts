@@ -241,6 +241,29 @@ export class ChatService {
     return { success: true as const, message };
   }
 
+  async editMessage(chatId: string, messageId: string, userId: string, rawContent: unknown) {
+    const isMember = await chatRepository.isChatMember(chatId, userId);
+    if (!isMember) return { success: false as const, error: 'Access denied' };
+
+    const validation = validateMessageContent(rawContent, { allowEmpty: true });
+    if (!validation.valid || validation.content === undefined) {
+      return { success: false as const, error: validation.error || 'Invalid message' };
+    }
+
+    const message = await messageRepository.editMessage(
+      messageId,
+      userId,
+      chatId,
+      validation.content,
+    );
+    if (!message) {
+      return { success: false as const, error: 'Message not found or empty' };
+    }
+
+    await chatRepository.updateTimestamp(chatId);
+    return { success: true as const, message };
+  }
+
   async toggleReaction(chatId: string, messageId: string, userId: string, emoji: string) {
     const isMember = await chatRepository.isChatMember(chatId, userId);
     if (!isMember) return { success: false as const, error: 'Access denied' };
