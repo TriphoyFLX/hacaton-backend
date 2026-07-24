@@ -1639,6 +1639,61 @@ app.post('/api/posts/:id/view', async (req, res) => {
   }
 });
 
+const soundPreviewSelect = {
+  id: true,
+  title: true,
+  audioUrl: true,
+  duration: true,
+  useCount: true,
+  authorId: true,
+  originalSoundTokId: true,
+  createdAt: true,
+  author: { select: { id: true, username: true, displayName: true, avatar: true } },
+} as const;
+
+async function ensureSoundForSoundTok(soundTokId: string) {
+  const tok = await prisma.soundTok.findUnique({
+    where: { id: soundTokId },
+    include: {
+      author: { select: { id: true, username: true } },
+      sound: { select: soundPreviewSelect },
+    },
+  });
+  if (!tok) return null;
+  if (tok.sound) return tok.sound;
+
+  const existingOriginal = await prisma.sound.findUnique({
+    where: { originalSoundTokId: tok.id },
+    select: soundPreviewSelect,
+  });
+  if (existingOriginal) {
+    if (!tok.soundId) {
+      await prisma.soundTok.update({
+        where: { id: tok.id },
+        data: { soundId: existingOriginal.id },
+      });
+    }
+    return existingOriginal;
+  }
+
+  const title = `Оригинальный звук — ${tok.author.username}`;
+  const sound = await prisma.sound.create({
+    data: {
+      title,
+      audioUrl: tok.videoUrl,
+      authorId: tok.authorId,
+      originalSoundTokId: tok.id,
+      useCount: 1,
+    },
+    select: soundPreviewSelect,
+  });
+  await prisma.soundTok.update({
+    where: { id: tok.id },
+    data: { soundId: sound.id },
+  });
+  return sound;
+}
+
 // Create SoundTok (short video)
 app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
   upload.single('video')(req, res, (error: unknown) => {
@@ -1660,25 +1715,71 @@ app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
 
     const description = sanitizeUserText(req.body?.description, 500);
     const file = req.file as Express.Multer.File;
+    const reuseSoundId =
+      typeof req.body?.soundId === 'string' && req.body.soundId.trim()
+        ? req.body.soundId.trim()
+        : null;
 
     if (!file) {
       return res.status(400).json({ error: 'Video file required' });
     }
 
-    const soundTok = await prisma.soundTok.create({
-      data: {
-        description,
-        videoUrl: `/uploads/${path.basename(file.filename)}`,
-        authorId: userId
-      },
-      include: {
-        author: {
-          select: {
-            id: true,
-            username: true
-          }
-        }
+    const videoUrl = `/uploads/${path.basename(file.filename)}`;
+
+    let soundId: string | null = null;
+    if (reuseSoundId) {
+      const existing = await prisma.sound.findUnique({ where: { id: reuseSoundId } });
+      if (!existing) {
+        return res.status(404).json({ error: 'Sound not found' });
       }
+      soundId = existing.id;
+    }
+
+    const author = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { username: true },
+    });
+
+    const soundTok = await prisma.$transaction(async (tx) => {
+      const created = await tx.soundTok.create({
+        data: {
+          description,
+          videoUrl,
+          authorId: userId,
+          soundId: soundId ?? undefined,
+        },
+        include: {
+          author: { select: authorPreviewSelect },
+          sound: { select: soundPreviewSelect },
+        },
+      });
+
+      if (soundId) {
+        await tx.sound.update({
+          where: { id: soundId },
+          data: { useCount: { increment: 1 } },
+        });
+        return created;
+      }
+
+      const sound = await tx.sound.create({
+        data: {
+          title: `Оригинальный звук — ${author?.username || 'user'}`,
+          audioUrl: videoUrl,
+          authorId: userId,
+          originalSoundTokId: created.id,
+          useCount: 1,
+        },
+        select: soundPreviewSelect,
+      });
+      return tx.soundTok.update({
+        where: { id: created.id },
+        data: { soundId: sound.id },
+        include: {
+          author: { select: authorPreviewSelect },
+          sound: { select: soundPreviewSelect },
+        },
+      });
     });
 
     res.status(201).json(soundTok);
@@ -1715,11 +1816,13 @@ app.get('/api/soundtok', async (req, res) => {
           description: true,
           videoUrl: true,
           authorId: true,
+          soundId: true,
           likes: true,
           commentsCount: true,
           createdAt: true,
           updatedAt: true,
           author: { select: authorPreviewSelect },
+          sound: { select: soundPreviewSelect },
           likesList: userId
             ? {
                 where: { userId },
@@ -1751,6 +1854,196 @@ app.get('/api/soundtok', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch SoundToks' });
+  }
+});
+
+// ─── Sounds (SoundTok audio pages) ───────────────────────────────────────────
+
+app.get('/api/sounds/from-video/:soundTokId', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    const sound = await ensureSoundForSoundTok(req.params.soundTokId);
+    if (!sound) return res.status(404).json({ error: 'SoundTok not found' });
+
+    let isFavorited = false;
+    if (userId) {
+      const fav = await prisma.soundFavorite.findUnique({
+        where: { userId_soundId: { userId, soundId: sound.id } },
+        select: { id: true },
+      });
+      isFavorited = Boolean(fav);
+    }
+    res.json({ ...sound, isFavorited });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to resolve sound' });
+  }
+});
+
+app.get('/api/sounds/favorites', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const take = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
+    const skip = Math.max(0, Number(req.query.offset) || 0);
+
+    const [rows, total] = await Promise.all([
+      prisma.soundFavorite.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+        include: {
+          sound: { select: soundPreviewSelect },
+        },
+      }),
+      prisma.soundFavorite.count({ where: { userId } }),
+    ]);
+
+    const items = rows.map((row) => ({
+      ...row.sound,
+      isFavorited: true,
+      favoritedAt: row.createdAt,
+    }));
+
+    res.json({
+      items,
+      total,
+      limit: take,
+      offset: skip,
+      hasMore: skip + items.length < total,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch favorite sounds' });
+  }
+});
+
+app.get('/api/sounds/:id', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    const sound = await prisma.sound.findUnique({
+      where: { id: req.params.id },
+      select: soundPreviewSelect,
+    });
+    if (!sound) return res.status(404).json({ error: 'Sound not found' });
+
+    let isFavorited = false;
+    if (userId) {
+      const fav = await prisma.soundFavorite.findUnique({
+        where: { userId_soundId: { userId, soundId: sound.id } },
+        select: { id: true },
+      });
+      isFavorited = Boolean(fav);
+    }
+
+    res.json({ ...sound, isFavorited });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch sound' });
+  }
+});
+
+app.get('/api/sounds/:id/videos', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    const soundId = req.params.id;
+    const take = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
+    const skip = Math.max(0, Number(req.query.offset) || 0);
+
+    const sound = await prisma.sound.findUnique({ where: { id: soundId }, select: { id: true } });
+    if (!sound) return res.status(404).json({ error: 'Sound not found' });
+
+    let followingIds = new Set<string>();
+    if (userId) {
+      const follows = await prisma.follow.findMany({
+        where: { followerId: userId },
+        select: { followingId: true },
+      });
+      followingIds = new Set(follows.map((f) => f.followingId));
+    }
+
+    const [soundToks, total] = await Promise.all([
+      prisma.soundTok.findMany({
+        where: { soundId },
+        select: {
+          id: true,
+          description: true,
+          videoUrl: true,
+          authorId: true,
+          soundId: true,
+          likes: true,
+          commentsCount: true,
+          createdAt: true,
+          updatedAt: true,
+          author: { select: authorPreviewSelect },
+          sound: { select: soundPreviewSelect },
+          likesList: userId
+            ? { where: { userId }, select: { id: true } }
+            : false,
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      prisma.soundTok.count({ where: { soundId } }),
+    ]);
+
+    const items = soundToks.map((soundTok) => ({
+      ...soundTok,
+      isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
+      authorIsFollowed: userId ? followingIds.has(soundTok.authorId) : false,
+      likesList: undefined,
+    }));
+
+    res.json({
+      items,
+      total,
+      limit: take,
+      offset: skip,
+      hasMore: skip + items.length < total,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch videos for sound' });
+  }
+});
+
+app.post('/api/sounds/:id/favorite', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const sound = await prisma.sound.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!sound) return res.status(404).json({ error: 'Sound not found' });
+
+    await prisma.soundFavorite.upsert({
+      where: { userId_soundId: { userId, soundId: sound.id } },
+      create: { userId, soundId: sound.id },
+      update: {},
+    });
+
+    res.json({ soundId: sound.id, isFavorited: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to favorite sound' });
+  }
+});
+
+app.delete('/api/sounds/:id/favorite', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    await prisma.soundFavorite.deleteMany({
+      where: { userId, soundId: req.params.id },
+    });
+
+    res.json({ soundId: req.params.id, isFavorited: false });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to unfavorite sound' });
   }
 });
 

@@ -130,6 +130,8 @@ model User {
 
   posts      Post[]
   soundToks  SoundTok[]
+  sounds     Sound[]
+  soundFavorites SoundFavorite[]
   comments   Comment[]
   likes      Like[]
   commentVotes CommentVote[]
@@ -380,19 +382,59 @@ model SoundTok {
   description String
   videoUrl    String
   authorId    String
+  soundId     String?
   likes       Int      @default(0)
   commentsCount Int    @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  sound       Sound?   @relation("UsedSound", fields: [soundId], references: [id], onDelete: SetNull)
+  originalForSound Sound? @relation("OriginalSound")
   comments    Comment[]
   likesList   Like[]
   sharedMessages Message[]
 
   @@index([authorId, createdAt])
   @@index([createdAt])
+  @@index([soundId, createdAt])
   @@map("sound_toks")
+}
+
+model Sound {
+  id                 String   @id @default(cuid())
+  title              String
+  audioUrl           String
+  duration           Float?
+  authorId           String
+  originalSoundTokId String?  @unique
+  useCount           Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  author             User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  originalSoundTok   SoundTok? @relation("OriginalSound", fields: [originalSoundTokId], references: [id], onDelete: SetNull)
+  videos             SoundTok[] @relation("UsedSound")
+  favorites          SoundFavorite[]
+
+  @@index([authorId, createdAt])
+  @@index([useCount, createdAt])
+  @@map("sounds")
+}
+
+model SoundFavorite {
+  id        String   @id @default(cuid())
+  userId    String
+  soundId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sound Sound @relation(fields: [soundId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, soundId])
+  @@index([userId, createdAt])
+  @@index([soundId])
+  @@map("sound_favorites")
 }
 
 model Comment {
