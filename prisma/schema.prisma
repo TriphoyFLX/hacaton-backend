@@ -80,6 +80,11 @@ enum ReportStatus {
   DISMISSED
 }
 
+enum CommentVoteType {
+  LIKE
+  DISLIKE
+}
+
 model User {
   id         String    @id @default(cuid())
   email      String    @unique
@@ -124,6 +129,8 @@ model User {
   soundToks  SoundTok[]
   comments   Comment[]
   likes      Like[]
+  commentVotes CommentVote[]
+  postCommentVotes PostCommentVote[]
   sentMessages Message[] @relation("SentMessages")
   receivedMessages Message[] @relation("ReceivedMessages")
   chatUsers   ChatUser[]
@@ -293,14 +300,32 @@ model PostComment {
   text      String   @db.Text
   authorId  String
   postId    String
+  likes     Int      @default(0)
+  dislikes  Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
   post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  votes  PostCommentVote[]
 
   @@index([postId, createdAt])
   @@map("post_comments")
+}
+
+model PostCommentVote {
+  id        String          @id @default(cuid())
+  userId    String
+  commentId String
+  type      CommentVoteType
+  createdAt DateTime        @default(now())
+
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, commentId])
+  @@index([commentId, type])
+  @@map("post_comment_votes")
 }
 
 model PostView {
@@ -355,13 +380,31 @@ model Comment {
   text      String
   authorId  String
   soundTokId String
+  likes     Int      @default(0)
+  dislikes  Int      @default(0)
   createdAt DateTime @default(now())
 
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   soundTok  SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
+  votes     CommentVote[]
 
   @@index([soundTokId, createdAt])
   @@map("comments")
+}
+
+model CommentVote {
+  id        String          @id @default(cuid())
+  userId    String
+  commentId String
+  type      CommentVoteType
+  createdAt DateTime        @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, commentId])
+  @@index([commentId, type])
+  @@map("comment_votes")
 }
 
 model Like {

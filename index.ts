@@ -220,6 +220,150 @@ const authorPreviewSelect = {
   role: true,
 } as const;
 
+const HIDDEN_COMMENT_TEXT = 'Вы скрыли этот комментарий';
+
+type CommentVoteRow = { type: 'LIKE' | 'DISLIKE' };
+
+function mapCommentWithVotes<T extends {
+  text: string;
+  likes: number;
+  dislikes: number;
+  votes?: CommentVoteRow[];
+}>(comment: T) {
+  const myVote = comment.votes?.[0]?.type ?? null;
+  const isHidden = myVote === 'DISLIKE';
+  const { votes: _votes, ...rest } = comment;
+  return {
+    ...rest,
+    text: isHidden ? HIDDEN_COMMENT_TEXT : comment.text,
+    likes: comment.likes ?? 0,
+    dislikes: comment.dislikes ?? 0,
+    isLiked: myVote === 'LIKE',
+    isDisliked: isHidden,
+    isHidden,
+  };
+}
+
+async function setPostCommentVote(userId: string, commentId: string, type: 'LIKE' | 'DISLIKE' | null) {
+  const comment = await prisma.postComment.findUnique({
+    where: { id: commentId },
+    select: { id: true, likes: true, dislikes: true },
+  });
+  if (!comment) return null;
+
+  const existing = await prisma.postCommentVote.findUnique({
+    where: { userId_commentId: { userId, commentId } },
+  });
+
+  let likes = comment.likes;
+  let dislikes = comment.dislikes;
+
+  if (!type) {
+    if (!existing) {
+      return { likes, dislikes, isLiked: false, isDisliked: false, isHidden: false };
+    }
+    if (existing.type === 'LIKE') likes = Math.max(0, likes - 1);
+    if (existing.type === 'DISLIKE') dislikes = Math.max(0, dislikes - 1);
+    await prisma.$transaction([
+      prisma.postCommentVote.delete({ where: { id: existing.id } }),
+      prisma.postComment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+    return { likes, dislikes, isLiked: false, isDisliked: false, isHidden: false };
+  }
+
+  if (!existing) {
+    if (type === 'LIKE') likes += 1;
+    else dislikes += 1;
+    await prisma.$transaction([
+      prisma.postCommentVote.create({ data: { userId, commentId, type } }),
+      prisma.postComment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+  } else if (existing.type === type) {
+    if (type === 'LIKE') likes = Math.max(0, likes - 1);
+    else dislikes = Math.max(0, dislikes - 1);
+    await prisma.$transaction([
+      prisma.postCommentVote.delete({ where: { id: existing.id } }),
+      prisma.postComment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+    return { likes, dislikes, isLiked: false, isDisliked: false, isHidden: false };
+  } else {
+    if (type === 'LIKE') {
+      likes += 1;
+      dislikes = Math.max(0, dislikes - 1);
+    } else {
+      dislikes += 1;
+      likes = Math.max(0, likes - 1);
+    }
+    await prisma.$transaction([
+      prisma.postCommentVote.update({ where: { id: existing.id }, data: { type } }),
+      prisma.postComment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+  }
+
+  const isDisliked = type === 'DISLIKE';
+  return { likes, dislikes, isLiked: type === 'LIKE', isDisliked, isHidden: isDisliked };
+}
+
+async function setSoundTokCommentVote(userId: string, commentId: string, type: 'LIKE' | 'DISLIKE' | null) {
+  const comment = await prisma.comment.findUnique({
+    where: { id: commentId },
+    select: { id: true, likes: true, dislikes: true },
+  });
+  if (!comment) return null;
+
+  const existing = await prisma.commentVote.findUnique({
+    where: { userId_commentId: { userId, commentId } },
+  });
+
+  let likes = comment.likes;
+  let dislikes = comment.dislikes;
+
+  if (!type) {
+    if (!existing) {
+      return { likes, dislikes, isLiked: false, isDisliked: false, isHidden: false };
+    }
+    if (existing.type === 'LIKE') likes = Math.max(0, likes - 1);
+    if (existing.type === 'DISLIKE') dislikes = Math.max(0, dislikes - 1);
+    await prisma.$transaction([
+      prisma.commentVote.delete({ where: { id: existing.id } }),
+      prisma.comment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+    return { likes, dislikes, isLiked: false, isDisliked: false, isHidden: false };
+  }
+
+  if (!existing) {
+    if (type === 'LIKE') likes += 1;
+    else dislikes += 1;
+    await prisma.$transaction([
+      prisma.commentVote.create({ data: { userId, commentId, type } }),
+      prisma.comment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+  } else if (existing.type === type) {
+    if (type === 'LIKE') likes = Math.max(0, likes - 1);
+    else dislikes = Math.max(0, dislikes - 1);
+    await prisma.$transaction([
+      prisma.commentVote.delete({ where: { id: existing.id } }),
+      prisma.comment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+    return { likes, dislikes, isLiked: false, isDisliked: false, isHidden: false };
+  } else {
+    if (type === 'LIKE') {
+      likes += 1;
+      dislikes = Math.max(0, dislikes - 1);
+    } else {
+      dislikes += 1;
+      likes = Math.max(0, likes - 1);
+    }
+    await prisma.$transaction([
+      prisma.commentVote.update({ where: { id: existing.id }, data: { type } }),
+      prisma.comment.update({ where: { id: commentId }, data: { likes, dislikes } }),
+    ]);
+  }
+
+  const isDisliked = type === 'DISLIKE';
+  return { likes, dislikes, isLiked: type === 'LIKE', isDisliked, isHidden: isDisliked };
+}
+
 const REPORT_REASONS = [
   'BULLYING',
   'SCAM',
@@ -1191,13 +1335,19 @@ app.delete('/api/posts/:id/like', async (req, res) => {
 
 app.get('/api/posts/:id/comments', async (req, res) => {
   try {
+    const userId = getUserFromToken(req.headers.authorization);
     const comments = await prisma.postComment.findMany({
       where: { postId: req.params.id },
-      include: { author: { select: authorPreviewSelect } },
+      include: {
+        author: { select: authorPreviewSelect },
+        votes: userId
+          ? { where: { userId }, select: { type: true }, take: 1 }
+          : false,
+      },
       orderBy: { createdAt: 'asc' },
       take: 100,
     });
-    res.json(comments);
+    res.json(comments.map((c) => mapCommentWithVotes(c)));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch comments' });
@@ -1227,10 +1377,57 @@ app.post('/api/posts/:id/comments', async (req, res) => {
       entityType: 'post',
       entityId: post.id,
     }).catch((error) => console.error('Failed to create comment notification:', error));
-    res.status(201).json({ comment, commentsCount: updated.commentsCount });
+    res.status(201).json({
+      comment: mapCommentWithVotes({ ...comment, likes: 0, dislikes: 0, votes: [] }),
+      commentsCount: updated.commentsCount,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to create comment' });
+  }
+});
+
+app.post('/api/posts/:postId/comments/:commentId/like', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const comment = await prisma.postComment.findFirst({
+      where: { id: req.params.commentId, postId: req.params.postId },
+      select: { id: true, text: true },
+    });
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    const result = await setPostCommentVote(userId, comment.id, 'LIKE');
+    if (!result) return res.status(404).json({ error: 'Comment not found' });
+    res.json({
+      id: comment.id,
+      ...result,
+      text: result.isHidden ? HIDDEN_COMMENT_TEXT : comment.text,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to like comment' });
+  }
+});
+
+app.post('/api/posts/:postId/comments/:commentId/dislike', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const comment = await prisma.postComment.findFirst({
+      where: { id: req.params.commentId, postId: req.params.postId },
+      select: { id: true, text: true },
+    });
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    const result = await setPostCommentVote(userId, comment.id, 'DISLIKE');
+    if (!result) return res.status(404).json({ error: 'Comment not found' });
+    res.json({
+      id: comment.id,
+      ...result,
+      text: result.isHidden ? HIDDEN_COMMENT_TEXT : comment.text,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to dislike comment' });
   }
 });
 
@@ -1535,24 +1732,23 @@ app.delete('/api/soundtok/:id/like', async (req, res) => {
 // Get comments for SoundTok
 app.get('/api/soundtok/:id/comments', async (req, res) => {
   try {
+    const userId = getUserFromToken(req.headers.authorization);
     const comments = await prisma.comment.findMany({
       where: {
         soundTokId: req.params.id
       },
       include: {
-        author: {
-          select: {
-            id: true,
-            username: true,
-          }
-        }
+        author: { select: authorPreviewSelect },
+        votes: userId
+          ? { where: { userId }, select: { type: true }, take: 1 }
+          : false,
       },
       orderBy: {
         createdAt: 'desc'
       }
     });
 
-    res.json(comments);
+    res.json(comments.map((c) => mapCommentWithVotes(c)));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch comments' });
@@ -1580,12 +1776,7 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
         soundTokId: req.params.id
       },
       include: {
-        author: {
-          select: {
-            id: true,
-            username: true,
-          }
-        }
+        author: { select: authorPreviewSelect },
       }
     });
 
@@ -1606,10 +1797,57 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
       entityType: 'soundtok',
       entityId: updated.id,
     }).catch((error) => console.error('Failed to create SoundTok comment notification:', error));
-    res.status(201).json({ comment, commentsCount: updated.commentsCount });
+    res.status(201).json({
+      comment: mapCommentWithVotes({ ...comment, likes: 0, dislikes: 0, votes: [] }),
+      commentsCount: updated.commentsCount,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to create comment' });
+  }
+});
+
+app.post('/api/soundtok/:soundTokId/comments/:commentId/like', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const comment = await prisma.comment.findFirst({
+      where: { id: req.params.commentId, soundTokId: req.params.soundTokId },
+      select: { id: true, text: true },
+    });
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    const result = await setSoundTokCommentVote(userId, comment.id, 'LIKE');
+    if (!result) return res.status(404).json({ error: 'Comment not found' });
+    res.json({
+      id: comment.id,
+      ...result,
+      text: result.isHidden ? HIDDEN_COMMENT_TEXT : comment.text,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to like comment' });
+  }
+});
+
+app.post('/api/soundtok/:soundTokId/comments/:commentId/dislike', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    const comment = await prisma.comment.findFirst({
+      where: { id: req.params.commentId, soundTokId: req.params.soundTokId },
+      select: { id: true, text: true },
+    });
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    const result = await setSoundTokCommentVote(userId, comment.id, 'DISLIKE');
+    if (!result) return res.status(404).json({ error: 'Comment not found' });
+    res.json({
+      id: comment.id,
+      ...result,
+      text: result.isHidden ? HIDDEN_COMMENT_TEXT : comment.text,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to dislike comment' });
   }
 });
 
