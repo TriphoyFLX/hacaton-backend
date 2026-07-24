@@ -53,10 +53,20 @@ import { rateLimitMiddleware } from './src/utils/rateLimiter';
 import { corsOptions, requireJwtSecret, securityHeaders } from './src/middleware/security';
 import { compressionMiddleware } from './src/middleware/compression';
 import { validateMessageContent } from './src/utils/messageValidation';
+import { sanitizeUserText } from './src/utils/contentSanitize';
+import {
+  buildSafeUploadFilename,
+  isAllowedAudioSample,
+  isAllowedUploadFile,
+  mediaKindFromExt,
+  safeUploadExtension,
+} from './src/utils/safeUpload';
 import { prisma } from './src/lib/prisma';
 
 dotenv.config();
 const JWT_SECRET = requireJwtSecret();
+/** Used so login always does a bcrypt compare (mitigates user-enumeration timing). */
+const LOGIN_DUMMY_HASH = bcrypt.hashSync('soundlab-timing-dummy-v1', 12);
 const app = express();
 const isProd = process.env.NODE_ENV === 'production';
 const debugLog = (...args: unknown[]) => {
@@ -79,13 +89,16 @@ if (!fs.existsSync(privatePresetsDir)) {
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
-  destination: (req: Request, file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) => {
+  destination: (_req: Request, _file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) => {
     cb(null, uploadsDir);
   },
-  filename: (req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
+  filename: (_req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
+    const safe = buildSafeUploadFilename(file.originalname);
+    if (!safe) {
+      return cb(new Error('Invalid file type'), '');
+    }
+    cb(null, safe);
+  },
 });
 
 const SOUNDTOK_MAX_BYTES = 15 * 1024 * 1024; // 15MB — matches SoundTok UI
@@ -94,27 +107,15 @@ const upload = multer({
   storage,
   limits: {
     fileSize: SOUNDTOK_MAX_BYTES,
+    files: 10,
   },
-  fileFilter: (req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
-    // Разрешаем изображения, видео и аудио файлы
-    const allowedImageTypes = /jpeg|jpg|png|gif/;
-    const allowedVideoTypes = /mp4|mov|avi|webm/;
-    const allowedAudioTypes = /mp3|wav|mpeg|audio\/mpeg|audio\/wav|audio\/mp3/;
-    
-    const extname = file.originalname.toLowerCase();
-    const mimetype = file.mimetype.toLowerCase();
-    
-    const isImage = allowedImageTypes.test(path.extname(extname)) || mimetype.includes('image/');
-    const isVideo = allowedVideoTypes.test(path.extname(extname)) || mimetype.includes('video/');
-    const isAudio = allowedAudioTypes.test(path.extname(extname)) || mimetype.includes('audio/');
-
-    if (isImage || isVideo || isAudio) {
+  fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
+    if (isAllowedUploadFile(file.originalname, file.mimetype)) {
       return cb(null, true);
-    } else {
-      console.log('Debug: Rejected file:', file.originalname, 'mimetype:', file.mimetype);
-      cb(new Error('Invalid file type'));
     }
-  }
+    console.warn('Rejected upload:', file.originalname, file.mimetype);
+    cb(new Error('Invalid file type'));
+  },
 });
 
 const MIDI_SAMPLE_MAX_BYTES = 6 * 1024 * 1024;
@@ -122,13 +123,8 @@ const midiSampleUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MIDI_SAMPLE_MAX_BYTES, files: 1 },
   fileFilter: (_req, file, cb) => {
-    const name = file.originalname || '';
-    const mime = (file.mimetype || '').toLowerCase();
-    const isAudio = mime.startsWith('audio/')
-      || mime === 'application/octet-stream'
-      || /\.(mp3|wav|ogg|flac|m4a|aac|aiff?|webm)$/i.test(name);
-    if (!isAudio) {
-      console.warn('Rejected midi sample:', name, 'mimetype:', file.mimetype);
+    if (!isAllowedAudioSample(file.originalname, file.mimetype)) {
+      console.warn('Rejected midi sample:', file.originalname, 'mimetype:', file.mimetype);
       return cb(new Error('Only audio files are allowed'));
     }
     cb(null, true);
@@ -157,6 +153,18 @@ app.use(
     etag: true,
     lastModified: true,
     immutable: false,
+    dotfiles: 'deny',
+    setHeaders(res, filePath) {
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+      // Never execute uploaded content as scripts
+      if (/\.(jpe?g|png|gif|webp|mp4|webm|mov|mp3|wav|ogg|flac|m4a|aac)$/i.test(filePath)) {
+        return;
+      }
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'attachment');
+    },
   }),
 );
 
@@ -188,6 +196,37 @@ const generalApiRateLimit = rateLimitMiddleware({
   windowMs: 60 * 1000,
   message: 'Rate limit exceeded',
 });
+const feedbackRateLimit = rateLimitMiddleware({
+  keyPrefix: 'pwa-feedback',
+  max: 8,
+  windowMs: 60 * 60 * 1000,
+  message: 'Too many feedback submissions. Try again later.',
+});
+const uploadRateLimit = rateLimitMiddleware({
+  keyPrefix: 'upload',
+  max: 40,
+  windowMs: 60 * 60 * 1000,
+  message: 'Too many uploads. Try again later.',
+});
+const searchRateLimit = rateLimitMiddleware({
+  keyPrefix: 'search',
+  max: 60,
+  windowMs: 60 * 1000,
+  message: 'Too many searches. Slow down.',
+});
+const aiRateLimit = rateLimitMiddleware({
+  keyPrefix: 'ai-gen',
+  max: 20,
+  windowMs: 60 * 60 * 1000,
+  message: 'Too many AI generations. Try again later.',
+});
+const webhookRateLimit = rateLimitMiddleware({
+  keyPrefix: 'billing-webhook',
+  max: 120,
+  windowMs: 60 * 1000,
+  message: 'Too many webhook calls',
+});
+
 app.use('/api', (req, res, next) => {
   if (req.path === '/health') return next();
   return generalApiRateLimit(req, res, next);
@@ -499,8 +538,8 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
       return res.status(400).json({ error: 'Invalid email address' });
     }
 
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+      return res.status(400).json({ error: 'Password must be 8–128 characters' });
     }
 
     const existingUser = await prisma.user.findFirst({
@@ -672,9 +711,9 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
 app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
   try {
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-    const { password } = req.body;
+    const password = typeof req.body.password === 'string' ? req.body.password : '';
 
-    if (!email || !password) {
+    if (!email || !password || password.length > 256) {
       return res.status(400).json({ error: 'Email and password required' });
     }
 
@@ -685,12 +724,10 @@ app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
         password: true,
       },
     });
-    if (!user || !user.password) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
 
-    const isValid = await bcrypt.compare(password, user.password);
-    if (!isValid) {
+    const hash = user?.password || LOGIN_DUMMY_HASH;
+    const isValid = await bcrypt.compare(password, hash);
+    if (!user || !user.password || !isValid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -841,6 +878,76 @@ const getUserFromToken = (authHeader?: string) => {
   }
 };
 
+const PWA_UNINSTALL_REASONS = [
+  'bugs',
+  'slow',
+  'dont_need',
+  'prefer_browser',
+  'privacy',
+  'other',
+] as const;
+
+const PWA_UNINSTALL_REASON_LABELS: Record<(typeof PWA_UNINSTALL_REASONS)[number], string> = {
+  bugs: 'Были баги / глючило',
+  slow: 'Работало медленно',
+  dont_need: 'Пока не нужно',
+  prefer_browser: 'Удобнее в обычном браузере',
+  privacy: 'Вопросы к приватности',
+  other: 'Другое',
+};
+
+app.post('/api/feedback/pwa-uninstall', feedbackRateLimit, async (req, res) => {
+  try {
+    const reasonRaw = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!PWA_UNINSTALL_REASONS.includes(reasonRaw as (typeof PWA_UNINSTALL_REASONS)[number])) {
+      return res.status(400).json({ error: 'Invalid reason' });
+    }
+    const reason = reasonRaw as (typeof PWA_UNINSTALL_REASONS)[number];
+    const details =
+      typeof req.body?.details === 'string' ? req.body.details.trim().slice(0, 1000) : '';
+    const userAgent =
+      typeof req.body?.userAgent === 'string'
+        ? req.body.userAgent.trim().slice(0, 400)
+        : String(req.headers['user-agent'] || '').slice(0, 400);
+    const platform =
+      typeof req.body?.platform === 'string' ? req.body.platform.trim().slice(0, 80) : '';
+    const language =
+      typeof req.body?.language === 'string' ? req.body.language.trim().slice(0, 40) : '';
+
+    let accountLine = 'Гость (не авторизован)';
+    const userId = getUserFromToken(req.headers.authorization);
+    if (userId) {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, username: true, email: true },
+      });
+      if (user) {
+        accountLine = `@${user.username} <${user.email}> (id: ${user.id})`;
+      }
+    }
+
+    const reasonLabel = PWA_UNINSTALL_REASON_LABELS[reason];
+    void sendAdminNotification(
+      'Отзыв: удалили PWA SoundLab',
+      [
+        `Причина: ${reasonLabel} (${reason})`,
+        `Подробности: ${details || '—'}`,
+        `Аккаунт: ${accountLine}`,
+        `Платформа: ${platform || '—'}`,
+        `Язык: ${language || '—'}`,
+        `User-Agent: ${userAgent || '—'}`,
+        `IP: ${req.ip || '—'}`,
+        `Время: ${new Date().toISOString()}`,
+      ].join('\n'),
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('pwa-uninstall feedback error:', error);
+    res.status(500).json({ error: 'Failed to submit feedback' });
+  }
+});
+
 // Helper function to check if user is admin
 const isAdmin = async (authHeader?: string) => {
   if (!authHeader) return false;
@@ -942,6 +1049,7 @@ app.get('/api/midi-projects/:id', authenticateToken, asyncRoute(async (req, res)
 app.post(
   '/api/midi-projects/:id/samples',
   authenticateToken,
+  uploadRateLimit,
   receiveMidiSample,
   asyncRoute(async (req, res) => {
     const project = await prisma.midiProject.findFirst({
@@ -1143,37 +1251,31 @@ app.delete('/api/notifications', authenticateToken, async (req: AuthenticatedReq
 });
 
 // Create post with media
-app.post('/api/posts', upload.array('media', 10), async (req, res) => {
+app.post('/api/posts', uploadRateLimit, upload.array('media', 10), async (req, res) => {
   try {
     const userId = getUserFromToken(req.headers.authorization);
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { content } = req.body;
-    const files = req.files as Express.Multer.File[];
+    const content = sanitizeUserText(req.body?.content, 4000);
+    const files = (req.files as Express.Multer.File[]) || [];
 
-    if (!content && (!files || files.length === 0)) {
+    if (!content && files.length === 0) {
       return res.status(400).json({ error: 'Content or media required' });
     }
 
-    // Get media type based on file extension
-    const getMediaType = (filename: string): 'IMAGE' | 'VIDEO' | 'AUDIO' => {
-      const ext = path.extname(filename).toLowerCase();
-      if (['.jpg', '.jpeg', '.png', '.gif'].includes(ext)) return 'IMAGE';
-      if (['.mp4', '.mov', '.avi'].includes(ext)) return 'VIDEO';
-      if (['.mp3', '.wav'].includes(ext)) return 'AUDIO';
-      return 'IMAGE';
-    };
-
-    const mediaItems = files.map(file => ({
-      type: getMediaType(file.filename),
-      url: `/uploads/${file.filename}`
-    }));
+    const mediaItems = files.map((file) => {
+      const ext = safeUploadExtension(file.filename) || safeUploadExtension(file.originalname) || '.jpg';
+      return {
+        type: mediaKindFromExt(ext),
+        url: `/uploads/${path.basename(file.filename)}`,
+      };
+    });
 
     const post = await prisma.post.create({
       data: {
-        content,
+        content: content || '',
         authorId: userId,
         media: {
           create: mediaItems
@@ -1512,7 +1614,7 @@ app.post('/api/posts/:id/view', async (req, res) => {
 });
 
 // Create SoundTok (short video)
-app.post('/api/soundtok', (req, res, next) => {
+app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
   upload.single('video')(req, res, (error: unknown) => {
     if (!error) return next();
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
@@ -1530,7 +1632,7 @@ app.post('/api/soundtok', (req, res, next) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { description } = req.body;
+    const description = sanitizeUserText(req.body?.description, 500);
     const file = req.file as Express.Multer.File;
 
     if (!file) {
@@ -1540,7 +1642,7 @@ app.post('/api/soundtok', (req, res, next) => {
     const soundTok = await prisma.soundTok.create({
       data: {
         description,
-        videoUrl: `/uploads/${file.filename}`,
+        videoUrl: `/uploads/${path.basename(file.filename)}`,
         authorId: userId
       },
       include: {
@@ -1560,7 +1662,7 @@ app.post('/api/soundtok', (req, res, next) => {
       console.error('Error message:', error.message);
       console.error('Error stack:', error.stack);
     }
-    res.status(500).json({ error: 'Failed to create SoundTok', details: error instanceof Error ? error.message : 'Unknown error' });
+    res.status(500).json({ error: 'Failed to create SoundTok' });
   }
 });
 
@@ -1763,15 +1865,17 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const { text } = req.body;
-
-    if (!text || text.trim() === '') {
-      return res.status(400).json({ error: 'Comment text required' });
+    const validation = validateMessageContent(req.body?.text);
+    if (!validation.valid || !validation.content) {
+      return res.status(400).json({ error: validation.error || 'Comment text required' });
+    }
+    if (validation.content.length > 1000) {
+      return res.status(400).json({ error: 'Comment is too long' });
     }
 
     const comment = await prisma.comment.create({
       data: {
-        text,
+        text: validation.content,
         authorId: userId,
         soundTokId: req.params.id
       },
@@ -1852,12 +1956,16 @@ app.post('/api/soundtok/:soundTokId/comments/:commentId/dislike', async (req, re
 });
 
 // Search functionality
-app.get('/api/search', async (req, res) => {
+app.get('/api/search', searchRateLimit, async (req, res) => {
   try {
     const { q, type } = req.query;
     
     if (!q || typeof q !== 'string') {
       return res.status(400).json({ error: 'Search query required' });
+    }
+    const query = q.trim().slice(0, 80);
+    if (query.length < 2) {
+      return res.status(400).json({ error: 'Search query too short' });
     }
 
     const results: {
@@ -1875,9 +1983,9 @@ app.get('/api/search', async (req, res) => {
       const users = await prisma.user.findMany({
         where: {
           OR: [
-            { username: { contains: q, mode: 'insensitive' } },
-            { displayName: { contains: q, mode: 'insensitive' } },
-            { usernameHistory: { some: { username: { contains: q, mode: 'insensitive' } } } },
+            { username: { contains: query, mode: 'insensitive' } },
+            { displayName: { contains: query, mode: 'insensitive' } },
+            { usernameHistory: { some: { username: { contains: query, mode: 'insensitive' } } } },
           ]
         },
         select: {
@@ -1897,7 +2005,7 @@ app.get('/api/search', async (req, res) => {
     if (!type || type === 'posts') {
       const posts = await prisma.post.findMany({
         where: {
-          content: { contains: q, mode: 'insensitive' }
+          content: { contains: query, mode: 'insensitive' }
         },
         include: {
           media: true,
@@ -1920,7 +2028,7 @@ app.get('/api/search', async (req, res) => {
     if (!type || type === 'soundtoks') {
       const soundToks = await prisma.soundTok.findMany({
         where: {
-          description: { contains: q, mode: 'insensitive' }
+          description: { contains: query, mode: 'insensitive' }
         },
         include: {
           author: {
@@ -3232,14 +3340,13 @@ app.patch('/api/battles/:id/status', authenticateToken, async (req: Authenticate
 });
 
 // Upload beat file
-app.post('/api/upload/beat', authenticateToken, upload.single('beat'), async (req, res) => {
+app.post('/api/upload/beat', authenticateToken, uploadRateLimit, upload.single('beat'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No beat file uploaded' });
     }
 
-    const fileUrl = `/uploads/${req.file.filename}`;
-    console.log('Debug: Beat uploaded with URL:', fileUrl);
+    const fileUrl = `/uploads/${path.basename(req.file.filename)}`;
     res.json({ url: fileUrl });
   } catch (error) {
     console.error('Error uploading beat:', error);
@@ -3248,13 +3355,13 @@ app.post('/api/upload/beat', authenticateToken, upload.single('beat'), async (re
 });
 
 // Upload recording
-app.post('/api/upload/recording', authenticateToken, upload.single('audio'), async (req, res) => {
+app.post('/api/upload/recording', authenticateToken, uploadRateLimit, upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const fileUrl = `/uploads/${req.file.filename}`;
+    const fileUrl = `/uploads/${path.basename(req.file.filename)}`;
     res.json({ url: fileUrl });
   } catch (error) {
     console.error('Error uploading recording:', error);
@@ -3315,7 +3422,7 @@ app.get('/api/battles/:id/recordings', authenticateToken, async (req: Authentica
 });
 
 // Save battle recording
-app.post('/api/battles/:id/recordings', authenticateToken, upload.single('audio'), async (req: AuthenticatedRequest, res) => {
+app.post('/api/battles/:id/recordings', authenticateToken, uploadRateLimit, upload.single('audio'), async (req: AuthenticatedRequest, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -3328,7 +3435,7 @@ app.post('/api/battles/:id/recordings', authenticateToken, upload.single('audio'
       return res.status(400).json({ error: 'Audio file is required' });
     }
     
-    const voiceUrl = `/uploads/${req.file.filename}`;
+    const voiceUrl = `/uploads/${path.basename(req.file.filename)}`;
     
     // Check if user is participant
     const participant = await prisma.battleParticipant.findFirst({
@@ -3680,7 +3787,7 @@ const generateMusicSchema = z.object({
   model: z.literal('v5.5').optional(),
 });
 
-app.post('/api/generate-music', authenticateToken, async (req: AuthenticatedRequest, res) => {
+app.post('/api/generate-music', authenticateToken, aiRateLimit, async (req: AuthenticatedRequest, res) => {
   try {
     const parsedRequest = generateMusicSchema.safeParse(req.body);
     if (!parsedRequest.success) {
@@ -3745,7 +3852,7 @@ app.get('/api/check-generation/:id', authenticateToken, async (req: Authenticate
     
     debugLog('CHECKING GENERATION ID:', id);
     
-    if (!id) {
+    if (!id || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) {
       return res.status(400).json({ error: 'Generation ID is required' });
     }
 
@@ -3823,7 +3930,11 @@ app.post('/api/billing/create-payment', authenticateToken, asyncRoute(async (req
     // Email only after real success (webhook / sync) — click = funnel metric in admin.
     res.status(201).json(created);
   } catch (e: any) {
-    res.status(e.status || 500).json({ error: e.message, details: e.details });
+    const status = e.status || 500;
+    res.status(status).json({
+      error: e.message || 'Payment creation failed',
+      ...(isProd ? {} : { details: e.details }),
+    });
   }
 }));
 
@@ -3837,14 +3948,14 @@ app.get('/api/billing/payments/:id', authenticateToken, asyncRoute(async (req, r
   }
 }));
 
-/** YooKassa HTTP notifications */
-app.post('/api/billing/webhook', async (req, res) => {
+/** YooKassa HTTP notifications — status always re-verified via YooKassa API */
+app.post('/api/billing/webhook', webhookRateLimit, async (req, res) => {
   try {
     await handleYooKassaWebhook(req.body);
     res.status(200).json({ ok: true });
-  } catch (e) {
+  } catch (e: any) {
     console.error('YooKassa webhook error:', e);
-    res.status(500).json({ error: 'Webhook failed' });
+    res.status(e.status || 500).json({ error: 'Webhook failed' });
   }
 });
 

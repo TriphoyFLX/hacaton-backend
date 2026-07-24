@@ -57,6 +57,8 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
       pingTimeout: 60000,
       pingInterval: 25000,
       connectTimeout: 10000,
+      maxHttpBufferSize: 1e6, // 1MB — chat payloads must stay small
+      allowEIO3: false,
     }
   );
 

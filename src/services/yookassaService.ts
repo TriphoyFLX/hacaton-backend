@@ -105,32 +105,60 @@ export async function createYooKassaPayment(opts: {
   };
 }
 
-/** Handle YooKassa webhook notification object. */
+/**
+ * Handle YooKassa HTTP notification.
+ * Never trust the payload alone — re-fetch payment status from YooKassa API
+ * before fulfilling (prevents forged "payment.succeeded" webhooks).
+ */
 export async function handleYooKassaWebhook(notification: any): Promise<void> {
-  const event = notification?.event;
-  const obj = notification?.object;
-  if (!obj?.id) return;
-
-  const payment = await prisma.payment.findFirst({
-    where: { yookassaPaymentId: String(obj.id) },
-  });
-  if (!payment) {
-    // Fallback: metadata.paymentId
-    const metaId = obj?.metadata?.paymentId;
-    if (!metaId) return;
-    const byMeta = await prisma.payment.findUnique({ where: { id: String(metaId) } });
-    if (!byMeta) return;
-    if (event === 'payment.succeeded' || obj.status === 'succeeded') {
-      await fulfillPayment(byMeta.id);
-    } else if (event === 'payment.canceled' || obj.status === 'canceled') {
-      await markPaymentCanceled(byMeta.id);
-    }
-    return;
+  if (!isYooKassaConfigured()) {
+    throw Object.assign(new Error('YooKassa is not configured'), { status: 503 });
   }
 
-  if (event === 'payment.succeeded' || obj.status === 'succeeded') {
+  const event = typeof notification?.event === 'string' ? notification.event : '';
+  const obj = notification?.object;
+  const yookassaId = obj?.id ? String(obj.id) : '';
+  if (!yookassaId || yookassaId.length > 128) return;
+
+  // Only process payment lifecycle events we care about
+  if (event && !event.startsWith('payment.')) return;
+
+  let payment = await prisma.payment.findFirst({
+    where: { yookassaPaymentId: yookassaId },
+  });
+
+  if (!payment) {
+    const metaId = obj?.metadata?.paymentId ? String(obj.metadata.paymentId) : '';
+    if (!metaId || metaId.length > 64) return;
+    payment = await prisma.payment.findUnique({ where: { id: metaId } });
+    if (!payment) return;
+    // Bind yookassa id if missing (first notification)
+    if (!payment.yookassaPaymentId) {
+      payment = await prisma.payment.update({
+        where: { id: payment.id },
+        data: { yookassaPaymentId: yookassaId },
+      });
+    } else if (payment.yookassaPaymentId !== yookassaId) {
+      console.warn('[yookassa] webhook id mismatch for payment', payment.id);
+      return;
+    }
+  }
+
+  if (payment.status === 'SUCCEEDED' || payment.status === 'CANCELED') return;
+
+  const res = await fetch(`https://api.yookassa.ru/v3/payments/${encodeURIComponent(yookassaId)}`, {
+    headers: { Authorization: authHeader() },
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.warn('[yookassa] webhook verify failed', res.status, data?.description || data?.code);
+    throw Object.assign(new Error('Unable to verify payment with YooKassa'), { status: 502 });
+  }
+
+  const status = String(data.status || '');
+  if (status === 'succeeded') {
     await fulfillPayment(payment.id);
-  } else if (event === 'payment.canceled' || obj.status === 'canceled') {
+  } else if (status === 'canceled') {
     await markPaymentCanceled(payment.id);
   }
 }
