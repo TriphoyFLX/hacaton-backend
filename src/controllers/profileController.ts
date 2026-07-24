@@ -62,12 +62,15 @@ export function createProfileHandlers(uploadsDir: string) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
-      const { username, displayName, bio } = req.body;
+      const { username, displayName, bio, likedSoundToksPublic } = req.body;
 
       const result = await profileService.updateProfile(req.user.id, {
         username,
         displayName,
         bio,
+        ...(typeof likedSoundToksPublic === 'boolean'
+          ? { likedSoundToksPublic }
+          : {}),
       });
 
       if (!result.success) {
@@ -216,6 +219,57 @@ export function createProfileHandlers(uploadsDir: string) {
     }
   }
 
+  async function getUserSoundToks(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { identifier } = req.params;
+      const limit = Number(req.query.limit) || 24;
+      const offset = Number(req.query.offset) || 0;
+      const result = await profileService.getProfileSoundToks(identifier, {
+        limit,
+        offset,
+        viewerId: req.user?.id,
+      });
+
+      if (!result) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error('getUserSoundToks error:', error);
+      res.status(500).json({ error: 'Failed to fetch SoundToks' });
+    }
+  }
+
+  async function getUserLikedSoundToks(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { identifier } = req.params;
+      const limit = Number(req.query.limit) || 24;
+      const offset = Number(req.query.offset) || 0;
+      const result = await profileService.getProfileLikedSoundToks(identifier, {
+        limit,
+        offset,
+        viewerId: req.user?.id,
+      });
+
+      if (!result) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      if ('forbidden' in result) {
+        return res.status(403).json({
+          error: 'Liked SoundToks are private',
+          private: true,
+        });
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error('getUserLikedSoundToks error:', error);
+      res.status(500).json({ error: 'Failed to fetch liked SoundToks' });
+    }
+  }
+
   return {
     getMyProfile,
     getPublicProfile,
@@ -223,5 +277,7 @@ export function createProfileHandlers(uploadsDir: string) {
     uploadAvatar,
     deleteAvatar: deleteAvatarHandler,
     searchUsers,
+    getUserSoundToks,
+    getUserLikedSoundToks,
   };
 }

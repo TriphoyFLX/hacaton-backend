@@ -24,12 +24,14 @@ export interface ProfileJson {
   avatar?: string | null;
   bio?: string | null;
   usernameChangeAvailableAt?: string | null;
+  likedSoundToksPublic?: boolean;
   birthDate?: string;
   role?: string;
   createdAt: string;
   updatedAt?: string;
   postsCount?: number;
   soundToksCount?: number;
+  likedSoundToksCount?: number;
   followersCount?: number;
   followingCount?: number;
   isFollowing?: boolean;
@@ -57,6 +59,7 @@ export function serializeProfile(
     avatar?: string | null;
     bio?: string | null;
     usernameChangedAt?: Date | null;
+    likedSoundToksPublic?: boolean | null;
     birthDate?: Date | null;
     role?: string;
     createdAt: Date;
@@ -68,13 +71,14 @@ export function serializeProfile(
   },
   options: {
     includeEmail?: boolean;
-    stats?: { posts: number; soundToks: number };
+    stats?: { posts: number; soundToks: number; likedSoundToks?: number };
     followStats?: { followersCount: number; followingCount: number; isFollowing?: boolean };
     visibility?: 'public' | 'private';
   } = {}
 ): ProfileJson {
   const isPrivate = options.visibility !== 'public';
   const rating = battleRatingPayload(user);
+  const likesPublic = Boolean(user.likedSoundToksPublic);
 
   const result: ProfileJson = {
     id: user.id,
@@ -82,6 +86,7 @@ export function serializeProfile(
     displayName: user.displayName,
     avatar: user.avatar,
     bio: user.bio,
+    likedSoundToksPublic: likesPublic,
     createdAt: user.createdAt.toISOString(),
     ...rating,
   };
@@ -111,6 +116,9 @@ export function serializeProfile(
   if (options.stats) {
     result.postsCount = options.stats.posts;
     result.soundToksCount = options.stats.soundToks;
+    if (isPrivate || likesPublic) {
+      result.likedSoundToksCount = options.stats.likedSoundToks ?? 0;
+    }
   }
 
   if (options.followStats) {
