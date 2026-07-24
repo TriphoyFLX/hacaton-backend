@@ -444,6 +444,39 @@ export class ChatRepository {
     return true;
   }
 
+  async updateGroupName(chatId: string, name: string): Promise<ChatWithUsers | null> {
+    const chat = await prisma.chat.update({
+      where: { id: chatId },
+      data: { name },
+      include: {
+        users: chatUserInclude,
+      },
+    });
+    return chat as ChatWithUsers;
+  }
+
+  async addGroupMembers(
+    chatId: string,
+    memberIds: string[]
+  ): Promise<ChatWithUsers | null> {
+    if (memberIds.length === 0) {
+      return this.getChatById(chatId);
+    }
+    await prisma.chatUser.createMany({
+      data: memberIds.map((userId) => ({
+        chatId,
+        userId,
+        role: ChatMemberRole.MEMBER,
+      })),
+      skipDuplicates: true,
+    });
+    await prisma.chat.update({
+      where: { id: chatId },
+      data: { updatedAt: new Date() },
+    });
+    return this.getChatById(chatId);
+  }
+
   async getChatMeta(chatId: string) {
     return prisma.chat.findUnique({
       where: { id: chatId },

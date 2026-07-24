@@ -224,6 +224,47 @@ export async function createGroup(req: AuthenticatedRequest, res: Response) {
   }
 }
 
+export async function renameGroup(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId } = req.params;
+    const name = typeof req.body?.name === 'string' ? req.body.name : '';
+    const result = await chatService.renameGroup(chatId, req.user.id, name);
+    if (!result.success || !result.chat) {
+      return res.status(400).json({ error: result.error || 'Не удалось переименовать' });
+    }
+    const formatted = formatChat(result.chat, req.user.id, 0);
+    getIO()?.to(`chat:${chatId}`).emit('chat:updated', formatted);
+    res.json(formatted);
+  } catch (error) {
+    console.error('renameGroup error:', error);
+    res.status(500).json({ error: 'Не удалось переименовать группу' });
+  }
+}
+
+export async function addGroupMembers(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId } = req.params;
+    const memberIds = Array.isArray(req.body?.memberIds) ? req.body.memberIds : [];
+    const result = await chatService.addGroupMembers(chatId, req.user.id, memberIds);
+    if (!result.success || !result.chat) {
+      return res.status(400).json({ error: result.error || 'Не удалось добавить' });
+    }
+    const formatted = formatChat(result.chat, req.user.id, 0);
+    getIO()?.to(`chat:${chatId}`).emit('chat:updated', formatted);
+    for (const memberId of memberIds) {
+      if (typeof memberId === 'string') {
+        getIO()?.to(`user:${memberId}`).emit('chat:updated', formatted);
+      }
+    }
+    res.json(formatted);
+  } catch (error) {
+    console.error('addGroupMembers error:', error);
+    res.status(500).json({ error: 'Не удалось добавить участников' });
+  }
+}
+
 export async function pinChat(req: AuthenticatedRequest, res: Response) {
   try {
     if (!req.user) {

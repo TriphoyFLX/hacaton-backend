@@ -19,6 +19,8 @@ import {
   deleteGroupAvatar,
   setGroupMemberRole,
   removeGroupMember,
+  renameGroup,
+  addGroupMembers,
 } from '../controllers/chatController';
 import { AuthenticatedRequest } from '../types';
 
@@ -94,6 +96,8 @@ export function createChatRouter(
   router.get('/:chatId/messages', authenticateToken, getMessages);
   router.post('/group', authenticateToken, createGroup);
   router.post('/', authenticateToken, createChat);
+  router.patch('/:chatId', authenticateToken, renameGroup);
+  router.post('/:chatId/members', authenticateToken, addGroupMembers);
   router.patch('/:chatId/pin', authenticateToken, pinChat);
   router.post('/:chatId/messages', authenticateToken, sendMessage);
   router.post('/:chatId/images', authenticateToken, handleImageUpload, uploadChatImage);

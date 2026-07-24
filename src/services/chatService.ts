@@ -261,6 +261,82 @@ export class ChatService {
     return { success: true, chat };
   }
 
+  async renameGroup(
+    chatId: string,
+    actorId: string,
+    name: string
+  ): Promise<{ success: boolean; chat?: ChatWithUsers; error?: string }> {
+    const trimmedName = name?.trim();
+    if (!trimmedName || trimmedName.length < 2 || trimmedName.length > MAX_GROUP_NAME_LENGTH) {
+      return {
+        success: false,
+        error: `Название группы должно быть от 2 до ${MAX_GROUP_NAME_LENGTH} символов`,
+      };
+    }
+    const meta = await chatRepository.getChatMeta(chatId);
+    if (!meta || meta.type !== ChatType.GROUP) {
+      return { success: false, error: 'Группа не найдена' };
+    }
+    const isAdmin = await chatRepository.isGroupAdmin(chatId, actorId);
+    if (!isAdmin) {
+      return { success: false, error: 'Только админ может менять название' };
+    }
+    const chat = await chatRepository.updateGroupName(chatId, trimmedName);
+    if (!chat) return { success: false, error: 'Не удалось переименовать группу' };
+    return { success: true, chat };
+  }
+
+  async addGroupMembers(
+    chatId: string,
+    actorId: string,
+    memberIds: string[]
+  ): Promise<{ success: boolean; chat?: ChatWithUsers; error?: string }> {
+    const meta = await chatRepository.getChatMeta(chatId);
+    if (!meta || meta.type !== ChatType.GROUP) {
+      return { success: false, error: 'Группа не найдена' };
+    }
+    const isAdmin = await chatRepository.isGroupAdmin(chatId, actorId);
+    if (!isAdmin) {
+      return { success: false, error: 'Только админ может добавлять участников' };
+    }
+
+    const uniqueMembers = [
+      ...new Set(
+        (Array.isArray(memberIds) ? memberIds : []).filter(
+          (id) => typeof id === 'string' && id !== actorId
+        )
+      ),
+    ];
+    if (uniqueMembers.length < 1) {
+      return { success: false, error: 'Выберите хотя бы одного участника' };
+    }
+
+    const existing = await chatRepository.getChatParticipants(chatId);
+    const existingSet = new Set(existing);
+    const toAdd = uniqueMembers.filter((id) => !existingSet.has(id));
+    if (toAdd.length < 1) {
+      return { success: false, error: 'Эти пользователи уже в группе' };
+    }
+    if (existing.length + toAdd.length > MAX_GROUP_MEMBERS) {
+      return { success: false, error: `В группе может быть не больше ${MAX_GROUP_MEMBERS} участников` };
+    }
+
+    for (const memberId of toAdd) {
+      const user = await userRepository.getUserById(memberId);
+      if (!user) {
+        return { success: false, error: 'Один из участников не найден' };
+      }
+      const blocked = await blockRepository.isEitherBlocked(actorId, memberId);
+      if (blocked) {
+        return { success: false, error: 'Нельзя добавить заблокированного пользователя' };
+      }
+    }
+
+    const chat = await chatRepository.addGroupMembers(chatId, toAdd);
+    if (!chat) return { success: false, error: 'Не удалось добавить участников' };
+    return { success: true, chat };
+  }
+
   async togglePin(
     chatId: string,
     userId: string,

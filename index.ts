@@ -1875,6 +1875,60 @@ app.get('/api/soundtok', async (req, res) => {
   }
 });
 
+// Single SoundTok (for notification / share deep-links)
+app.get('/api/soundtok/:id', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    const soundTok = await prisma.soundTok.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        description: true,
+        videoUrl: true,
+        authorId: true,
+        soundId: true,
+        likes: true,
+        commentsCount: true,
+        createdAt: true,
+        updatedAt: true,
+        author: { select: authorPreviewSelect },
+        sound: { select: soundPreviewSelect },
+        likesList: userId
+          ? {
+              where: { userId },
+              select: { id: true },
+            }
+          : false,
+      },
+    });
+    if (!soundTok) return res.status(404).json({ error: 'SoundTok not found' });
+
+    let authorIsFollowed = false;
+    if (userId) {
+      const follow = await prisma.follow.findUnique({
+        where: {
+          followerId_followingId: {
+            followerId: userId,
+            followingId: soundTok.authorId,
+          },
+        },
+        select: { id: true },
+      });
+      authorIsFollowed = Boolean(follow);
+    }
+
+    res.json({
+      ...soundTok,
+      isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
+      authorIsFollowed,
+      likesList: undefined,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch SoundTok' });
+  }
+});
+
 // ─── Sounds (SoundTok audio pages) ───────────────────────────────────────────
 
 app.get('/api/sounds/from-video/:soundTokId', async (req, res) => {
