@@ -2192,7 +2192,8 @@ app.get('/api/soundtok/:id/comments', async (req, res) => {
       },
       orderBy: {
         createdAt: 'desc'
-      }
+      },
+      take: 50,
     });
 
     res.json(comments.map((c) => mapCommentWithVotes(c)));

@@ -39,16 +39,35 @@ export function createChatRouter(
       destination: (_req, _file, cb) => cb(null, uploadsDir),
       filename: (_req, file, cb) => {
         const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-        cb(null, uniqueSuffix + path.extname(file.originalname).toLowerCase());
+        let ext = path.extname(file.originalname || '').toLowerCase();
+        if (!ext || ext === '.') {
+          const mime = (file.mimetype || '').toLowerCase();
+          if (mime === 'image/jpeg' || mime === 'image/jpg') ext = '.jpg';
+          else if (mime === 'image/png') ext = '.png';
+          else if (mime === 'image/gif') ext = '.gif';
+          else if (mime === 'image/webp') ext = '.webp';
+          else ext = '.png';
+        }
+        cb(null, uniqueSuffix + ext);
       },
     }),
     limits: { fileSize: 8 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
-      const allowed = /jpeg|jpg|png|gif|webp/;
-      const extOk = allowed.test(path.extname(file.originalname).toLowerCase());
-      const mimeOk = file.mimetype.startsWith('image/');
-      if (extOk && mimeOk) cb(null, true);
-      else cb(new Error('Invalid file type. Allowed: JPEG, PNG, GIF, WEBP'));
+      const mime = (file.mimetype || '').toLowerCase();
+      const allowedMimes = new Set([
+        'image/jpeg',
+        'image/jpg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+      ]);
+      const ext = path.extname(file.originalname || '').toLowerCase().replace('.', '');
+      const extOk = !ext || /^(jpe?g|png|gif|webp)$/i.test(ext);
+      if ((allowedMimes.has(mime) || mime.startsWith('image/')) && extOk) {
+        cb(null, true);
+      } else {
+        cb(new Error('Invalid file type. Allowed: JPEG, PNG, GIF, WEBP'));
+      }
     },
   });
 
