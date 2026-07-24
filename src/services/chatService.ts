@@ -13,12 +13,44 @@ const MAX_GROUP_MEMBERS = 100;
 const MAX_GROUP_NAME_LENGTH = 120;
 const CHAT_IMAGE_PATH_RE = /^\/uploads\/[A-Za-z0-9._-]+$/;
 
+/** Must match multer destination from index.ts (`__dirname/uploads`). */
+let configuredUploadsDir = path.join(process.cwd(), 'uploads');
+
+export function configureChatUploadsDir(dir: string): void {
+  configuredUploadsDir = dir;
+}
+
+function normalizeChatImagePath(imageUrl: string): string | null {
+  let value = imageUrl.trim();
+  try {
+    if (/^https?:\/\//i.test(value)) {
+      value = new URL(value).pathname;
+    }
+  } catch {
+    return null;
+  }
+  value = value.split('?')[0].split('#')[0];
+  if (!CHAT_IMAGE_PATH_RE.test(value)) return null;
+  return value;
+}
+
 function resolveUploadsFile(imageUrl: string, uploadsDir?: string): string | null {
-  if (!CHAT_IMAGE_PATH_RE.test(imageUrl)) return null;
-  const baseDir = uploadsDir ?? path.join(process.cwd(), 'uploads');
-  const filePath = path.join(baseDir, path.basename(imageUrl));
-  if (!fs.existsSync(filePath)) return null;
-  return filePath;
+  const normalized = normalizeChatImagePath(imageUrl);
+  if (!normalized) return null;
+
+  const name = path.basename(normalized);
+  const candidates = [
+    uploadsDir,
+    configuredUploadsDir,
+    path.join(process.cwd(), 'uploads'),
+    path.join(process.cwd(), 'dist', 'uploads'),
+  ].filter((dir): dir is string => Boolean(dir));
+
+  for (const dir of candidates) {
+    const filePath = path.join(dir, name);
+    if (fs.existsSync(filePath)) return filePath;
+  }
+  return null;
 }
 
 export interface SendMessageResult {
@@ -85,10 +117,11 @@ export class ChatService {
 
       let imageUrl: string | null = null;
       if (data.imageUrl) {
-        if (!resolveUploadsFile(data.imageUrl, data.uploadsDir)) {
+        const normalized = normalizeChatImagePath(data.imageUrl);
+        if (!normalized || !resolveUploadsFile(normalized, data.uploadsDir)) {
           return { success: false, error: 'Изображение не найдено' };
         }
-        imageUrl = data.imageUrl;
+        imageUrl = normalized;
       }
 
       const chatMeta = await chatRepository.getChatMeta(data.chatId);
@@ -389,10 +422,15 @@ export class ChatService {
     if (!isAdmin) {
       return { success: false, error: 'Только админ может менять фото группы' };
     }
-    if (avatar !== null && !CHAT_IMAGE_PATH_RE.test(avatar)) {
-      return { success: false, error: 'Некорректный путь к фото' };
+    let nextAvatar = avatar;
+    if (avatar !== null) {
+      const normalized = normalizeChatImagePath(avatar);
+      if (!normalized) {
+        return { success: false, error: 'Некорректный путь к фото' };
+      }
+      nextAvatar = normalized;
     }
-    const chat = await chatRepository.updateGroupAvatar(chatId, avatar);
+    const chat = await chatRepository.updateGroupAvatar(chatId, nextAvatar);
     if (!chat) return { success: false, error: 'Не удалось обновить фото' };
     return { success: true, chat };
   }

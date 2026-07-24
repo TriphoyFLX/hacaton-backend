@@ -46,6 +46,7 @@ import {
   vkPkce,
 } from './src/services/oauthService';
 import { createChatRouter } from './src/routes/chatRoutes';
+import { configureChatUploadsDir } from './src/services/chatService';
 import { createBlockRouter } from './src/routes/blockRoutes';
 import { createSocketServer, getUserOnlineStatus } from './src/websocket/socketServer';
 import { notificationService } from './src/services/notificationService';
@@ -82,6 +83,7 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
+configureChatUploadsDir(uploadsDir);
 const privatePresetsDir = path.join(__dirname, 'private-presets');
 if (!fs.existsSync(privatePresetsDir)) {
   fs.mkdirSync(privatePresetsDir, { recursive: true });
