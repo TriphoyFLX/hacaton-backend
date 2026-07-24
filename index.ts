@@ -1811,6 +1811,41 @@ app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
   }
 });
 
+async function getSoundTokRepostPreviews(soundTokIds: string[], take = 3) {
+  const previewByTok = new Map<string, Array<{
+    id: string;
+    username: string;
+    displayName: string | null;
+    avatar: string | null;
+    role: string;
+    plan: string;
+    planExpiresAt: Date | null;
+  }>>();
+  if (soundTokIds.length === 0) return previewByTok;
+
+  const rows = await prisma.soundTokRepost.findMany({
+    where: { soundTokId: { in: soundTokIds } },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      soundTokId: true,
+      user: { select: authorPreviewSelect },
+    },
+  });
+
+  for (const row of rows) {
+    const list = previewByTok.get(row.soundTokId) ?? [];
+    if (list.length >= take) continue;
+    list.push(row.user);
+    previewByTok.set(row.soundTokId, list);
+  }
+  return previewByTok;
+}
+
+async function getSoundTokRepostPreview(soundTokId: string, take = 3) {
+  const map = await getSoundTokRepostPreviews([soundTokId], take);
+  return map.get(soundTokId) ?? [];
+}
+
 // Get SoundToks (paginated — full catalog remains reachable via offset)
 app.get('/api/soundtok', async (req, res) => {
   try {
@@ -1863,11 +1898,14 @@ app.get('/api/soundtok', async (req, res) => {
       prisma.soundTok.count(),
     ]);
 
+    const previewByTok = await getSoundTokRepostPreviews(soundToks.map((tok) => tok.id));
+
     const items = soundToks.map((soundTok) => ({
       ...soundTok,
       isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
       isReposted: userId ? Boolean(soundTok.reposts && soundTok.reposts.length > 0) : false,
       authorIsFollowed: userId ? followingIds.has(soundTok.authorId) : false,
+      repostPreview: previewByTok.get(soundTok.id) ?? [],
       likesList: undefined,
       reposts: undefined,
     }));
@@ -1935,11 +1973,14 @@ app.get('/api/soundtok/:id', async (req, res) => {
       authorIsFollowed = Boolean(follow);
     }
 
+    const repostPreview = await getSoundTokRepostPreview(soundTok.id);
+
     res.json({
       ...soundTok,
       isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
       isReposted: userId ? Boolean(soundTok.reposts && soundTok.reposts.length > 0) : false,
       authorIsFollowed,
+      repostPreview,
       likesList: undefined,
       reposts: undefined,
     });
@@ -2259,7 +2300,13 @@ app.post('/api/soundtok/:id/repost', async (req, res) => {
       select: { id: true },
     });
     if (existing) {
-      return res.json({ id: soundTok.id, repostsCount: soundTok.repostsCount, isReposted: true });
+      const repostPreview = await getSoundTokRepostPreview(soundTok.id);
+      return res.json({
+        id: soundTok.id,
+        repostsCount: soundTok.repostsCount,
+        isReposted: true,
+        repostPreview,
+      });
     }
 
     const [, updated] = await prisma.$transaction([
@@ -2271,7 +2318,8 @@ app.post('/api/soundtok/:id/repost', async (req, res) => {
       }),
     ]);
 
-    res.json({ ...updated, isReposted: true });
+    const repostPreview = await getSoundTokRepostPreview(soundTok.id);
+    res.json({ ...updated, isReposted: true, repostPreview });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to repost SoundTok' });
@@ -2292,7 +2340,8 @@ app.delete('/api/soundtok/:id/repost', async (req, res) => {
         where: { id: req.params.id },
         select: { id: true, repostsCount: true },
       });
-      return res.json({ ...current, isReposted: false });
+      const repostPreview = current ? await getSoundTokRepostPreview(current.id) : [];
+      return res.json({ ...current, isReposted: false, repostPreview });
     }
 
     const [, updated] = await prisma.$transaction([
@@ -2306,14 +2355,60 @@ app.delete('/api/soundtok/:id/repost', async (req, res) => {
       }),
     ]);
 
+    const repostPreview = await getSoundTokRepostPreview(req.params.id);
     res.json({
       id: updated.id,
       repostsCount: Math.max(0, updated.repostsCount),
       isReposted: false,
+      repostPreview,
     });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to remove repost' });
+  }
+});
+
+// List who reposted a SoundTok
+app.get('/api/soundtok/:id/reposts', async (req, res) => {
+  try {
+    const soundTok = await prisma.soundTok.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, repostsCount: true },
+    });
+    if (!soundTok) return res.status(404).json({ error: 'SoundTok not found' });
+
+    const take = Math.min(50, Math.max(1, Number(req.query.limit) || 30));
+    const skip = Math.max(0, Number(req.query.offset) || 0);
+
+    const [rows, total] = await Promise.all([
+      prisma.soundTokRepost.findMany({
+        where: { soundTokId: soundTok.id },
+        orderBy: { createdAt: 'asc' },
+        take,
+        skip,
+        select: {
+          id: true,
+          createdAt: true,
+          user: { select: authorPreviewSelect },
+        },
+      }),
+      prisma.soundTokRepost.count({ where: { soundTokId: soundTok.id } }),
+    ]);
+
+    res.json({
+      items: rows.map((row) => ({
+        id: row.id,
+        createdAt: row.createdAt,
+        user: row.user,
+      })),
+      total: Math.max(total, soundTok.repostsCount),
+      limit: take,
+      offset: skip,
+      hasMore: skip + rows.length < total,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to fetch reposts' });
   }
 });
 
