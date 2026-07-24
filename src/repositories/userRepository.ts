@@ -13,6 +13,8 @@ export interface UserProfile {
   likedSoundToksPublic?: boolean;
   birthDate?: Date;
   role: string;
+  plan?: string;
+  planExpiresAt?: Date | null;
   emailVerified?: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -48,6 +50,8 @@ export class UserRepository {
         likedSoundToksPublic: true,
         birthDate: true,
         role: true,
+        plan: true,
+        planExpiresAt: true,
         emailVerified: true,
         createdAt: true,
         updatedAt: true,
@@ -119,6 +123,8 @@ export class UserRepository {
       likedSoundToksPublic: true,
       birthDate: true,
       role: true,
+      plan: true,
+      planExpiresAt: true,
       createdAt: true,
       updatedAt: true,
     } as const;
@@ -210,6 +216,8 @@ export class UserRepository {
       bio: true,
       birthDate: true,
       role: true,
+      plan: true,
+      planExpiresAt: true,
       createdAt: true,
       updatedAt: true,
       battleElo: true,
@@ -274,6 +282,8 @@ export class UserRepository {
           displayName: true,
           avatar: true,
           role: true,
+          plan: true,
+          planExpiresAt: true,
         },
       },
       likesList: viewerId
@@ -385,6 +395,8 @@ export class UserRepository {
         bio: true,
         birthDate: true,
         role: true,
+        plan: true,
+        planExpiresAt: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -415,6 +427,8 @@ export class UserRepository {
         bio: true,
         birthDate: true,
         role: true,
+        plan: true,
+        planExpiresAt: true,
         createdAt: true,
         updatedAt: true,
       },

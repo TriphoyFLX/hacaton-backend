@@ -252,13 +252,15 @@ const userPublicSelect = {
   updatedAt: true,
 } as const;
 
-/** Lean author card for feeds / comments — includes role for admin badge. */
+/** Lean author card for feeds / comments — includes role for admin badge and plan for Platinum. */
 const authorPreviewSelect = {
   id: true,
   username: true,
   displayName: true,
   avatar: true,
   role: true,
+  plan: true,
+  planExpiresAt: true,
 } as const;
 
 const HIDDEN_COMMENT_TEXT = 'Вы скрыли этот комментарий';

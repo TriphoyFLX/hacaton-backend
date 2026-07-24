@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { battleRatingPayload } from '../services/battleRating';
+import { resolveVisiblePlan } from '../services/planService';
 
 export function getAvatarFilePath(avatarUrl: string, uploadsDir?: string): string {
   const baseDir = uploadsDir ?? path.join(process.cwd(), 'uploads');
@@ -27,6 +28,8 @@ export interface ProfileJson {
   likedSoundToksPublic?: boolean;
   birthDate?: string;
   role?: string;
+  /** Effective plan for public display (FREE | PRO | PLATINUM). */
+  plan?: 'FREE' | 'PRO' | 'PLATINUM';
   createdAt: string;
   updatedAt?: string;
   postsCount?: number;
@@ -62,6 +65,8 @@ export function serializeProfile(
     likedSoundToksPublic?: boolean | null;
     birthDate?: Date | null;
     role?: string;
+    plan?: string | null;
+    planExpiresAt?: Date | null;
     createdAt: Date;
     updatedAt?: Date;
     battleElo?: number | null;
@@ -79,6 +84,7 @@ export function serializeProfile(
   const isPrivate = options.visibility !== 'public';
   const rating = battleRatingPayload(user);
   const likesPublic = Boolean(user.likedSoundToksPublic);
+  const plan = resolveVisiblePlan(user);
 
   const result: ProfileJson = {
     id: user.id,
@@ -87,6 +93,7 @@ export function serializeProfile(
     avatar: user.avatar,
     bio: user.bio,
     likedSoundToksPublic: likesPublic,
+    plan,
     createdAt: user.createdAt.toISOString(),
     ...rating,
   };

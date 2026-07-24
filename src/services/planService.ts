@@ -49,6 +49,25 @@ export async function getActivePlan(userId: string): Promise<PlanId> {
   return user.plan as PlanId;
 }
 
+/** Pure plan resolution for public cards / feeds (no DB writes). */
+export function resolveVisiblePlan(input: {
+  plan?: string | null;
+  planExpiresAt?: Date | string | null;
+  role?: string | null;
+}): PlanId {
+  if (input.role === 'ADMIN') return 'PLATINUM';
+  const plan = (input.plan as PlanId) || 'FREE';
+  if (plan === 'FREE') return 'FREE';
+  if (input.planExpiresAt) {
+    const expires =
+      input.planExpiresAt instanceof Date
+        ? input.planExpiresAt
+        : new Date(input.planExpiresAt);
+    if (!Number.isNaN(expires.getTime()) && expires < new Date()) return 'FREE';
+  }
+  return plan;
+}
+
 export async function getBillingSnapshot(userId: string): Promise<EffectivePlan> {
   const plan = await getActivePlan(userId);
   const cfg = PLAN_CATALOG[plan];
