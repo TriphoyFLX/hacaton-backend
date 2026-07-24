@@ -38,37 +38,37 @@ export declare const TOKEN_PACKS: {
         readonly id: "TOKENS_400";
         readonly name: "Пакет 400 токенов";
         readonly tokens: 400;
-        readonly priceRub: 199;
+        readonly priceRub: 299;
         readonly generations: 4;
-        readonly description: "Старт: 4 генерации. Базовая цена за токен.";
+        readonly description: "Базовый пакет: 4 генерации.";
         readonly badge: string | null;
     };
     readonly TOKENS_800: {
         readonly id: "TOKENS_800";
         readonly name: "Пакет 800 токенов";
         readonly tokens: 800;
-        readonly priceRub: 359;
+        readonly priceRub: 549;
         readonly generations: 8;
-        readonly description: "Выгоднее старта: −10% к цене за генерацию.";
-        readonly badge: "−10%";
+        readonly description: "Стандартный пакет: −8% к цене за генерацию.";
+        readonly badge: "−8%";
     };
     readonly TOKENS_1200: {
         readonly id: "TOKENS_1200";
         readonly name: "Пакет 1200 токенов";
         readonly tokens: 1200;
-        readonly priceRub: 499;
+        readonly priceRub: 799;
         readonly generations: 12;
-        readonly description: "Популярный объём: −16% к цене за генерацию.";
-        readonly badge: "−16%";
+        readonly description: "Расширенный пакет: −11% к цене за генерацию.";
+        readonly badge: "−11%";
     };
     readonly TOKENS_2400: {
         readonly id: "TOKENS_2400";
         readonly name: "Пакет 2400 токенов";
         readonly tokens: 2400;
-        readonly priceRub: 899;
+        readonly priceRub: 1399;
         readonly generations: 24;
-        readonly description: "Максимум выгоды: −25% к цене за генерацию.";
-        readonly badge: "−25%";
+        readonly description: "Максимальный пакет: −22% к цене за генерацию.";
+        readonly badge: "−22%";
     };
 };
 export type TokenPackId = keyof typeof TOKEN_PACKS;
@@ -88,7 +88,7 @@ export declare function productForKind(kind: PaymentProductKind): {
     description: string;
 } | {
     kind: "TOKENS_400" | "TOKENS_800" | "TOKENS_1200" | "TOKENS_2400";
-    amountRub: 899 | 499 | 199 | 359;
+    amountRub: 1399 | 799 | 549 | 299 | 249 | 499;
     description: string;
 };
 //# sourceMappingURL=plans.d.ts.map

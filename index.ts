@@ -208,7 +208,7 @@ const uploadRateLimit = rateLimitMiddleware({
   keyPrefix: 'upload',
   max: 40,
   windowMs: 60 * 60 * 1000,
-  message: 'Too many uploads. Try again later.',
+  message: 'Слишком много загрузок подряд. Подождите немного и попробуйте снова',
 });
 const searchRateLimit = rateLimitMiddleware({
   keyPrefix: 'search',
@@ -536,18 +536,32 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
 
     if (!username || !normalizedEmail || !password || !birthDate || !agreedToTerms) {
-      return res.status(400).json({ error: 'All fields required and terms must be accepted' });
+      return res.status(400).json({
+        error: 'Заполните все поля и примите условия использования',
+      });
     }
     if (!isEmailConfigured()) {
-      return res.status(503).json({ error: 'Email service is temporarily unavailable' });
+      return res.status(503).json({
+        error: 'Почта временно недоступна. Попробуйте чуть позже',
+      });
     }
 
     if (!isValidEmail(normalizedEmail)) {
-      return res.status(400).json({ error: 'Invalid email address' });
+      return res.status(400).json({
+        error: 'Проверьте email — похоже, он написан неправильно',
+      });
+    }
+
+    if (typeof username !== 'string' || username.trim().length < 3 || username.trim().length > 30) {
+      return res.status(400).json({
+        error: 'Имя пользователя — от 3 до 30 символов',
+      });
     }
 
     if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
-      return res.status(400).json({ error: 'Password must be 8–128 characters' });
+      return res.status(400).json({
+        error: 'Пароль должен быть от 8 до 128 символов',
+      });
     }
 
     const existingUser = await prisma.user.findFirst({
@@ -585,13 +599,17 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
         return res.status(200).json({
           requiresVerification: true,
           email: normalizedEmail,
-          message: 'Verification code sent to your email',
+          message: 'Код подтверждения отправлен на email',
         });
       }
       if (existingUser.email === normalizedEmail) {
-        return res.status(400).json({ error: 'Email already exists' });
+        return res.status(400).json({
+          error: 'Этот email уже зарегистрирован. Войдите или восстановите доступ',
+        });
       }
-      return res.status(400).json({ error: 'Username already exists' });
+      return res.status(400).json({
+        error: 'Это имя пользователя уже занято. Придумайте другое',
+      });
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
@@ -619,11 +637,11 @@ app.post('/api/auth/register', authRateLimit, async (req, res) => {
     res.status(201).json({
       requiresVerification: true,
       email: normalizedEmail,
-      message: 'Verification code sent to your email',
+      message: 'Код подтверждения отправлен на email',
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Registration failed' });
+    res.status(500).json({ error: 'Не удалось зарегистрироваться. Попробуйте позже' });
   }
 });
 
@@ -633,12 +651,12 @@ app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
     const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
 
     if (!email || !code) {
-      return res.status(400).json({ error: 'Email and code required' });
+      return res.status(400).json({ error: 'Введите email и код из письма' });
     }
 
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Пользователь не найден' });
     }
 
     if (user.emailVerified) {
@@ -651,11 +669,11 @@ app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
     }
 
     if (!user.emailVerificationCode || !verifyVerificationCode(user.emailVerificationCode, code)) {
-      return res.status(400).json({ error: 'Invalid verification code' });
+      return res.status(400).json({ error: 'Неверный код. Проверьте письмо и попробуйте снова' });
     }
 
     if (!user.emailVerificationExpires || user.emailVerificationExpires < new Date()) {
-      return res.status(400).json({ error: 'Verification code expired' });
+      return res.status(400).json({ error: 'Срок кода истёк. Запросите новый код' });
     }
 
     const updated = await prisma.user.update({
@@ -677,7 +695,7 @@ app.post('/api/auth/verify-email', authRateLimit, async (req, res) => {
     res.json({ user: updated, token });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Verification failed' });
+    res.status(500).json({ error: 'Не удалось подтвердить email. Попробуйте снова' });
   }
 });
 
@@ -685,18 +703,20 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
   try {
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     if (!email) {
-      return res.status(400).json({ error: 'Email required' });
+      return res.status(400).json({ error: 'Укажите email' });
     }
     if (!isEmailConfigured()) {
-      return res.status(503).json({ error: 'Email service is temporarily unavailable' });
+      return res.status(503).json({
+        error: 'Почта временно недоступна. Попробуйте чуть позже',
+      });
     }
 
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Пользователь не найден' });
     }
     if (user.emailVerified) {
-      return res.status(400).json({ error: 'Email already verified' });
+      return res.status(400).json({ error: 'Email уже подтверждён — можно войти' });
     }
 
     const { code, expires } = createVerificationPayload();
@@ -709,10 +729,10 @@ app.post('/api/auth/resend-code', authStrictRateLimit, async (req, res) => {
     });
     await sendVerificationEmail(email, code);
 
-    res.json({ message: 'Verification code resent', email });
+    res.json({ message: 'Код отправлен повторно', email });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Failed to resend code' });
+    res.status(500).json({ error: 'Не удалось отправить код. Попробуйте позже' });
   }
 });
 
@@ -722,7 +742,7 @@ app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
     const password = typeof req.body.password === 'string' ? req.body.password : '';
 
     if (!email || !password || password.length > 256) {
-      return res.status(400).json({ error: 'Email and password required' });
+      return res.status(400).json({ error: 'Введите email и пароль' });
     }
 
     const user = await prisma.user.findUnique({
@@ -736,12 +756,12 @@ app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
     const hash = user?.password || LOGIN_DUMMY_HASH;
     const isValid = await bcrypt.compare(password, hash);
     if (!user || !user.password || !isValid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: 'Неверный email или пароль' });
     }
 
     if (!user.emailVerified) {
       return res.status(403).json({
-        error: 'Email not verified',
+        error: 'Сначала подтвердите email — мы отправили код на почту',
         requiresVerification: true,
         email: user.email,
       });
@@ -753,7 +773,7 @@ app.post('/api/auth/login', authStrictRateLimit, async (req, res) => {
     res.json({ user: userWithoutPassword, token });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: 'Login failed' });
+    res.status(500).json({ error: 'Не удалось войти. Попробуйте позже' });
   }
 });
 
@@ -1717,10 +1737,18 @@ app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
   upload.single('video')(req, res, (error: unknown) => {
     if (!error) return next();
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: 'Video must not exceed 15 MB' });
+      return res.status(413).json({ error: 'Видео слишком большое — максимум 15 МБ' });
     }
     console.warn('SoundTok multer error:', error);
-    return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid video' });
+    const raw = error instanceof Error ? error.message : '';
+    if (/invalid file type/i.test(raw)) {
+      return res.status(400).json({
+        error: 'Неподходящий тип файла. Загрузите видео (например MP4 или WebM)',
+      });
+    }
+    return res.status(400).json({
+      error: 'Не удалось принять видео. Проверьте формат и размер файла',
+    });
   });
 }, async (req, res) => {
   try {
@@ -1728,7 +1756,7 @@ app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
     debugLog('SoundTok upload', { userId: userId || null, hasFile: Boolean(req.file) });
     
     if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
+      return res.status(401).json({ error: 'Войдите в аккаунт, чтобы продолжить' });
     }
 
     const description = sanitizeUserText(req.body?.description, 500);
@@ -1739,7 +1767,7 @@ app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
         : null;
 
     if (!file) {
-      return res.status(400).json({ error: 'Video file required' });
+      return res.status(400).json({ error: 'Выберите видеофайл для загрузки' });
     }
 
     const videoUrl = `/uploads/${path.basename(file.filename)}`;
@@ -1748,7 +1776,7 @@ app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
     if (reuseSoundId) {
       const existing = await prisma.sound.findUnique({ where: { id: reuseSoundId } });
       if (!existing) {
-        return res.status(404).json({ error: 'Sound not found' });
+        return res.status(404).json({ error: 'Звук не найден. Выберите другой' });
       }
       soundId = existing.id;
     }
@@ -1807,7 +1835,7 @@ app.post('/api/soundtok', uploadRateLimit, (req, res, next) => {
       console.error('Error message:', error.message);
       console.error('Error stack:', error.stack);
     }
-    res.status(500).json({ error: 'Failed to create SoundTok' });
+    res.status(500).json({ error: 'Не удалось опубликовать видео. Попробуйте ещё раз' });
   }
 });
 

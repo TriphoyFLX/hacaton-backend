@@ -8,7 +8,7 @@ export declare function createYooKassaPayment(opts: {
     paymentId: string;
     yookassaPaymentId: string;
     confirmationUrl: string | null;
-    amountRub: 899 | 249 | 499 | 199 | 359;
+    amountRub: 1399 | 799 | 549 | 299 | 249 | 499;
     kind: PaymentProductKind;
 }>;
 export declare function handleYooKassaWebhook(notification: any): Promise<void>;
