@@ -77,4 +77,14 @@ export const notificationService = {
     const result = await prisma.notification.deleteMany({ where: { userId } });
     return result.count;
   },
+
+  async remove(userId: string, ids: string[]) {
+    if (!ids.length) {
+      return prisma.notification.count({ where: { userId, readAt: null } });
+    }
+    await prisma.notification.deleteMany({
+      where: { userId, id: { in: ids } },
+    });
+    return prisma.notification.count({ where: { userId, readAt: null } });
+  },
 };

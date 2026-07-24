@@ -1280,11 +1280,30 @@ app.patch('/api/notifications/read', authenticateToken, async (req: Authenticate
 
 app.delete('/api/notifications', authenticateToken, async (req: AuthenticatedRequest, res) => {
   try {
+    const ids = Array.isArray(req.body?.ids) && req.body.ids.every((id: unknown) => typeof id === 'string')
+      ? (req.body.ids as string[])
+      : undefined;
+
+    if (ids?.length) {
+      const unreadCount = await notificationService.remove(req.user!.id, ids);
+      return res.json({ deletedCount: ids.length, unreadCount });
+    }
+
     const deletedCount = await notificationService.clear(req.user!.id);
     res.json({ deletedCount, unreadCount: 0 });
   } catch (error) {
     console.error('Failed to clear notifications:', error);
     res.status(500).json({ error: 'Failed to clear notifications' });
+  }
+});
+
+app.delete('/api/notifications/:id', authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const unreadCount = await notificationService.remove(req.user!.id, [req.params.id]);
+    res.json({ deletedCount: 1, unreadCount });
+  } catch (error) {
+    console.error('Failed to delete notification:', error);
+    res.status(500).json({ error: 'Failed to delete notification' });
   }
 });
 
@@ -2339,6 +2358,15 @@ app.post('/api/soundtok/:id/repost', async (req, res) => {
       });
     }
 
+    const priorReposters = await prisma.soundTokRepost.findMany({
+      where: {
+        soundTokId: soundTok.id,
+        userId: { not: userId },
+      },
+      select: { userId: true },
+      take: 100,
+    });
+
     const [, updated] = await prisma.$transaction([
       prisma.soundTokRepost.create({ data: { userId, soundTokId: soundTok.id } }),
       prisma.soundTok.update({
@@ -2347,6 +2375,25 @@ app.post('/api/soundtok/:id/repost', async (req, res) => {
         select: { id: true, repostsCount: true },
       }),
     ]);
+
+    // Notify author + people who already reposted the same clip
+    const notifyIds = new Set<string>(priorReposters.map((r) => r.userId));
+    if (soundTok.authorId !== userId) {
+      notifyIds.add(soundTok.authorId);
+    }
+
+    for (const recipientId of notifyIds) {
+      const isAuthor = recipientId === soundTok.authorId;
+      void notificationService
+        .create({
+          userId: recipientId,
+          actorId: userId,
+          type: 'REPOST',
+          entityType: isAuthor ? 'soundtok' : 'soundtok_same_repost',
+          entityId: soundTok.id,
+        })
+        .catch((error) => console.error('Failed to create SoundTok repost notification:', error));
+    }
 
     const repostPreview = await getSoundTokRepostPreview(soundTok.id);
     res.json({ ...updated, isReposted: true, repostPreview });

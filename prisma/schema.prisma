@@ -45,6 +45,7 @@ enum NotificationType {
   COMMENT
   FOLLOW
   MESSAGE
+  REPOST
 }
 
 enum ChatType {
