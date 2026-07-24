@@ -26,6 +26,7 @@ export interface ProfileJson {
   bio?: string | null;
   usernameChangeAvailableAt?: string | null;
   likedSoundToksPublic?: boolean;
+  repostedSoundToksPublic?: boolean;
   birthDate?: string;
   role?: string;
   /** Effective plan for public display (FREE | PRO | PLATINUM). */
@@ -35,6 +36,7 @@ export interface ProfileJson {
   postsCount?: number;
   soundToksCount?: number;
   likedSoundToksCount?: number;
+  repostedSoundToksCount?: number;
   followersCount?: number;
   followingCount?: number;
   isFollowing?: boolean;
@@ -63,6 +65,7 @@ export function serializeProfile(
     bio?: string | null;
     usernameChangedAt?: Date | null;
     likedSoundToksPublic?: boolean | null;
+    repostedSoundToksPublic?: boolean | null;
     birthDate?: Date | null;
     role?: string;
     plan?: string | null;
@@ -76,7 +79,7 @@ export function serializeProfile(
   },
   options: {
     includeEmail?: boolean;
-    stats?: { posts: number; soundToks: number; likedSoundToks?: number };
+    stats?: { posts: number; soundToks: number; likedSoundToks?: number; repostedSoundToks?: number };
     followStats?: { followersCount: number; followingCount: number; isFollowing?: boolean };
     visibility?: 'public' | 'private';
   } = {}
@@ -84,6 +87,7 @@ export function serializeProfile(
   const isPrivate = options.visibility !== 'public';
   const rating = battleRatingPayload(user);
   const likesPublic = Boolean(user.likedSoundToksPublic);
+  const repostsPublic = Boolean(user.repostedSoundToksPublic);
   const plan = resolveVisiblePlan(user);
 
   const result: ProfileJson = {
@@ -93,6 +97,7 @@ export function serializeProfile(
     avatar: user.avatar,
     bio: user.bio,
     likedSoundToksPublic: likesPublic,
+    repostedSoundToksPublic: repostsPublic,
     plan,
     createdAt: user.createdAt.toISOString(),
     ...rating,
@@ -125,6 +130,9 @@ export function serializeProfile(
     result.soundToksCount = options.stats.soundToks;
     if (isPrivate || likesPublic) {
       result.likedSoundToksCount = options.stats.likedSoundToks ?? 0;
+    }
+    if (isPrivate || repostsPublic) {
+      result.repostedSoundToksCount = options.stats.repostedSoundToks ?? 0;
     }
   }
 

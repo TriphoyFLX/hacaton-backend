@@ -62,7 +62,7 @@ export function createProfileHandlers(uploadsDir: string) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
-      const { username, displayName, bio, likedSoundToksPublic } = req.body;
+      const { username, displayName, bio, likedSoundToksPublic, repostedSoundToksPublic } = req.body;
 
       const result = await profileService.updateProfile(req.user.id, {
         username,
@@ -70,6 +70,9 @@ export function createProfileHandlers(uploadsDir: string) {
         bio,
         ...(typeof likedSoundToksPublic === 'boolean'
           ? { likedSoundToksPublic }
+          : {}),
+        ...(typeof repostedSoundToksPublic === 'boolean'
+          ? { repostedSoundToksPublic }
           : {}),
       });
 
@@ -270,6 +273,35 @@ export function createProfileHandlers(uploadsDir: string) {
     }
   }
 
+  async function getUserRepostedSoundToks(req: AuthenticatedRequest, res: Response) {
+    try {
+      const { identifier } = req.params;
+      const limit = Number(req.query.limit) || 24;
+      const offset = Number(req.query.offset) || 0;
+      const result = await profileService.getProfileRepostedSoundToks(identifier, {
+        limit,
+        offset,
+        viewerId: req.user?.id,
+      });
+
+      if (!result) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      if ('forbidden' in result) {
+        return res.status(403).json({
+          error: 'Reposted SoundToks are private',
+          private: true,
+        });
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error('getUserRepostedSoundToks error:', error);
+      res.status(500).json({ error: 'Failed to fetch reposted SoundToks' });
+    }
+  }
+
   return {
     getMyProfile,
     getPublicProfile,
@@ -279,5 +311,6 @@ export function createProfileHandlers(uploadsDir: string) {
     searchUsers,
     getUserSoundToks,
     getUserLikedSoundToks,
+    getUserRepostedSoundToks,
   };
 }

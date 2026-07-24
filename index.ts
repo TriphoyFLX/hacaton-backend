@@ -1837,11 +1837,19 @@ app.get('/api/soundtok', async (req, res) => {
           soundId: true,
           likes: true,
           commentsCount: true,
+          views: true,
+          repostsCount: true,
           createdAt: true,
           updatedAt: true,
           author: { select: authorPreviewSelect },
           sound: { select: soundPreviewSelect },
           likesList: userId
+            ? {
+                where: { userId },
+                select: { id: true },
+              }
+            : false,
+          reposts: userId
             ? {
                 where: { userId },
                 select: { id: true },
@@ -1858,8 +1866,10 @@ app.get('/api/soundtok', async (req, res) => {
     const items = soundToks.map((soundTok) => ({
       ...soundTok,
       isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
+      isReposted: userId ? Boolean(soundTok.reposts && soundTok.reposts.length > 0) : false,
       authorIsFollowed: userId ? followingIds.has(soundTok.authorId) : false,
       likesList: undefined,
+      reposts: undefined,
     }));
 
     res.json({
@@ -1889,11 +1899,19 @@ app.get('/api/soundtok/:id', async (req, res) => {
         soundId: true,
         likes: true,
         commentsCount: true,
+        views: true,
+        repostsCount: true,
         createdAt: true,
         updatedAt: true,
         author: { select: authorPreviewSelect },
         sound: { select: soundPreviewSelect },
         likesList: userId
+          ? {
+              where: { userId },
+              select: { id: true },
+            }
+          : false,
+        reposts: userId
           ? {
               where: { userId },
               select: { id: true },
@@ -1920,8 +1938,10 @@ app.get('/api/soundtok/:id', async (req, res) => {
     res.json({
       ...soundTok,
       isLiked: userId ? Boolean(soundTok.likesList && soundTok.likesList.length > 0) : false,
+      isReposted: userId ? Boolean(soundTok.reposts && soundTok.reposts.length > 0) : false,
       authorIsFollowed,
       likesList: undefined,
+      reposts: undefined,
     });
   } catch (error) {
     console.error(error);
@@ -2219,6 +2239,157 @@ app.delete('/api/soundtok/:id/like', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to unlike SoundTok' });
+  }
+});
+
+// Repost SoundTok
+app.post('/api/soundtok/:id/repost', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const soundTok = await prisma.soundTok.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, authorId: true, repostsCount: true },
+    });
+    if (!soundTok) return res.status(404).json({ error: 'SoundTok not found' });
+
+    const existing = await prisma.soundTokRepost.findUnique({
+      where: { userId_soundTokId: { userId, soundTokId: soundTok.id } },
+      select: { id: true },
+    });
+    if (existing) {
+      return res.json({ id: soundTok.id, repostsCount: soundTok.repostsCount, isReposted: true });
+    }
+
+    const [, updated] = await prisma.$transaction([
+      prisma.soundTokRepost.create({ data: { userId, soundTokId: soundTok.id } }),
+      prisma.soundTok.update({
+        where: { id: soundTok.id },
+        data: { repostsCount: { increment: 1 } },
+        select: { id: true, repostsCount: true },
+      }),
+    ]);
+
+    res.json({ ...updated, isReposted: true });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to repost SoundTok' });
+  }
+});
+
+app.delete('/api/soundtok/:id/repost', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const existing = await prisma.soundTokRepost.findUnique({
+      where: { userId_soundTokId: { userId, soundTokId: req.params.id } },
+      select: { id: true },
+    });
+    if (!existing) {
+      const current = await prisma.soundTok.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, repostsCount: true },
+      });
+      return res.json({ ...current, isReposted: false });
+    }
+
+    const [, updated] = await prisma.$transaction([
+      prisma.soundTokRepost.delete({
+        where: { userId_soundTokId: { userId, soundTokId: req.params.id } },
+      }),
+      prisma.soundTok.update({
+        where: { id: req.params.id },
+        data: { repostsCount: { decrement: 1 } },
+        select: { id: true, repostsCount: true },
+      }),
+    ]);
+
+    res.json({
+      id: updated.id,
+      repostsCount: Math.max(0, updated.repostsCount),
+      isReposted: false,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to remove repost' });
+  }
+});
+
+// Record SoundTok view (auth or guest key)
+app.post('/api/soundtok/:id/view', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    const guestKeyRaw = typeof req.body?.guestKey === 'string' ? req.body.guestKey.trim() : '';
+    const guestKey =
+      guestKeyRaw && guestKeyRaw.length >= 8 && guestKeyRaw.length <= 128 ? guestKeyRaw : null;
+
+    if (!userId && !guestKey) {
+      return res.status(400).json({ error: 'guestKey required for anonymous views' });
+    }
+
+    const soundTok = await prisma.soundTok.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, authorId: true, views: true },
+    });
+    if (!soundTok) return res.status(404).json({ error: 'SoundTok not found' });
+
+    if (userId && soundTok.authorId === userId) {
+      return res.json({ id: soundTok.id, views: soundTok.views });
+    }
+
+    if (userId) {
+      const existing = await prisma.soundTokView.findUnique({
+        where: { userId_soundTokId: { userId, soundTokId: soundTok.id } },
+        select: { id: true },
+      });
+      if (existing) return res.json({ id: soundTok.id, views: soundTok.views });
+      try {
+        const [, updated] = await prisma.$transaction([
+          prisma.soundTokView.create({ data: { userId, soundTokId: soundTok.id } }),
+          prisma.soundTok.update({
+            where: { id: soundTok.id },
+            data: { views: { increment: 1 } },
+            select: { views: true },
+          }),
+        ]);
+        return res.json({ id: soundTok.id, views: updated.views });
+      } catch {
+        const current = await prisma.soundTok.findUnique({
+          where: { id: soundTok.id },
+          select: { views: true },
+        });
+        return res.json({ id: soundTok.id, views: current?.views ?? soundTok.views });
+      }
+    }
+
+    const existingGuest = await prisma.soundTokView.findUnique({
+      where: { guestKey_soundTokId: { guestKey: guestKey!, soundTokId: soundTok.id } },
+      select: { id: true },
+    });
+    if (existingGuest) return res.json({ id: soundTok.id, views: soundTok.views });
+
+    try {
+      const [, updated] = await prisma.$transaction([
+        prisma.soundTokView.create({ data: { guestKey: guestKey!, soundTokId: soundTok.id } }),
+        prisma.soundTok.update({
+          where: { id: soundTok.id },
+          data: { views: { increment: 1 } },
+          select: { views: true },
+        }),
+      ]);
+      return res.json({ id: soundTok.id, views: updated.views });
+    } catch {
+      const current = await prisma.soundTok.findUnique({
+        where: { id: soundTok.id },
+        select: { views: true },
+      });
+      return res.json({ id: soundTok.id, views: current?.views ?? soundTok.views });
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to record SoundTok view' });
   }
 });
 

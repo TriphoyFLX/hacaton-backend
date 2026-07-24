@@ -11,6 +11,7 @@ export interface UserProfile {
   bio?: string | null;
   usernameChangedAt?: Date | null;
   likedSoundToksPublic?: boolean;
+  repostedSoundToksPublic?: boolean;
   birthDate?: Date;
   role: string;
   plan?: string;
@@ -30,6 +31,7 @@ export interface UpdateUserData {
   bio?: string;
   avatar?: string | null;
   likedSoundToksPublic?: boolean;
+  repostedSoundToksPublic?: boolean;
 }
 
 export class UserRepository {
@@ -48,6 +50,7 @@ export class UserRepository {
         bio: true,
         usernameChangedAt: true,
         likedSoundToksPublic: true,
+        repostedSoundToksPublic: true,
         birthDate: true,
         role: true,
         plan: true,
@@ -111,6 +114,9 @@ export class UserRepository {
     if (data.likedSoundToksPublic !== undefined) {
       updateData.likedSoundToksPublic = Boolean(data.likedSoundToksPublic);
     }
+    if (data.repostedSoundToksPublic !== undefined) {
+      updateData.repostedSoundToksPublic = Boolean(data.repostedSoundToksPublic);
+    }
 
     const profileSelect = {
       id: true,
@@ -121,6 +127,7 @@ export class UserRepository {
       bio: true,
       usernameChangedAt: true,
       likedSoundToksPublic: true,
+        repostedSoundToksPublic: true,
       birthDate: true,
       role: true,
       plan: true,
@@ -226,6 +233,7 @@ export class UserRepository {
       battleDraws: true,
       usernameChangedAt: true,
       likedSoundToksPublic: true,
+        repostedSoundToksPublic: true,
     } as const;
 
     const direct = await prisma.user.findFirst({
@@ -255,14 +263,15 @@ export class UserRepository {
    */
   async getUserStats(
     userId: string
-  ): Promise<{ posts: number; soundToks: number; likedSoundToks: number }> {
-    const [posts, soundToks, likedSoundToks] = await Promise.all([
+  ): Promise<{ posts: number; soundToks: number; likedSoundToks: number; repostedSoundToks: number }> {
+    const [posts, soundToks, likedSoundToks, repostedSoundToks] = await Promise.all([
       prisma.post.count({ where: { authorId: userId } }),
       prisma.soundTok.count({ where: { authorId: userId } }),
       prisma.like.count({ where: { userId } }),
+      prisma.soundTokRepost.count({ where: { userId } }),
     ]);
 
-    return { posts, soundToks, likedSoundToks };
+    return { posts, soundToks, likedSoundToks, repostedSoundToks };
   }
 
   private soundTokPreviewSelect(viewerId?: string) {
@@ -273,6 +282,8 @@ export class UserRepository {
       authorId: true,
       likes: true,
       commentsCount: true,
+      views: true,
+      repostsCount: true,
       createdAt: true,
       updatedAt: true,
       author: {
@@ -292,18 +303,27 @@ export class UserRepository {
             select: { id: true },
           }
         : false,
+      reposts: viewerId
+        ? {
+            where: { userId: viewerId },
+            select: { id: true },
+          }
+        : false,
     } as const;
   }
 
   private mapSoundTokPreview<T extends {
     likesList?: { id: string }[] | false;
+    reposts?: { id: string }[] | false;
   }>(soundTok: T, viewerId?: string) {
-    const { likesList, ...rest } = soundTok as T & {
+    const { likesList, reposts, ...rest } = soundTok as T & {
       likesList?: { id: string }[];
+      reposts?: { id: string }[];
     };
     return {
       ...rest,
       isLiked: viewerId ? Boolean(likesList && likesList.length > 0) : false,
+      isReposted: viewerId ? Boolean(reposts && reposts.length > 0) : false,
     };
   }
 
@@ -362,6 +382,41 @@ export class UserRepository {
         skip,
       }),
       prisma.like.count({ where: { userId } }),
+    ]);
+
+    const items = rows.map((row) => this.mapSoundTokPreview(row.soundTok, opts.viewerId));
+    return {
+      items,
+      total,
+      limit: take,
+      offset: skip,
+      hasMore: skip + items.length < total,
+    };
+  }
+
+  /**
+   * Paginated SoundToks reposted by a user
+   */
+  async getUserRepostedSoundToks(
+    userId: string,
+    opts: { limit?: number; offset?: number; viewerId?: string } = {}
+  ) {
+    const take = Math.min(50, Math.max(1, opts.limit ?? 24));
+    const skip = Math.max(0, opts.offset ?? 0);
+    const select = this.soundTokPreviewSelect(opts.viewerId);
+
+    const [rows, total] = await Promise.all([
+      prisma.soundTokRepost.findMany({
+        where: { userId },
+        select: {
+          createdAt: true,
+          soundTok: { select },
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      prisma.soundTokRepost.count({ where: { userId } }),
     ]);
 
     const items = rows.map((row) => this.mapSoundTokPreview(row.soundTok, opts.viewerId));

@@ -202,7 +202,7 @@ export class ProfileService {
    */
   async getPublicProfile(identifier: string, viewerId?: string): Promise<{
     user: UserProfile;
-    stats: { posts: number; soundToks: number; likedSoundToks: number };
+    stats: { posts: number; soundToks: number; likedSoundToks: number; repostedSoundToks: number };
     followStats: { followersCount: number; followingCount: number; isFollowing: boolean };
   } | null> {
     let user = await userRepository.getUserById(identifier);
@@ -264,6 +264,29 @@ export class ProfileService {
     }
 
     const page = await userRepository.getUserLikedSoundToks(user.id, opts);
+    return { userId: user.id, ...page };
+  }
+
+  /**
+   * Reposted SoundToks — owner always; others only if public
+   */
+  async getProfileRepostedSoundToks(
+    identifier: string,
+    opts: { limit?: number; offset?: number; viewerId?: string } = {}
+  ): Promise<
+    | { forbidden: true; private: true }
+    | { userId: string; items: unknown[]; total: number; limit: number; offset: number; hasMore: boolean }
+    | null
+  > {
+    const user = await this.resolveProfileUser(identifier);
+    if (!user) return null;
+
+    const isOwner = Boolean(opts.viewerId && opts.viewerId === user.id);
+    if (!isOwner && !user.repostedSoundToksPublic) {
+      return { forbidden: true, private: true };
+    }
+
+    const page = await userRepository.getUserRepostedSoundToks(user.id, opts);
     return { userId: user.id, ...page };
   }
 

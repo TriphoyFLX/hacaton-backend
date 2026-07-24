@@ -71,6 +71,7 @@ export function createProfileRouter(
   router.delete('/avatar', authenticateToken, handlers.deleteAvatar);
   router.get('/:identifier/soundtoks', optionalAuth, handlers.getUserSoundToks);
   router.get('/:identifier/liked-soundtoks', optionalAuth, handlers.getUserLikedSoundToks);
+  router.get('/:identifier/reposted-soundtoks', optionalAuth, handlers.getUserRepostedSoundToks);
   router.get('/:identifier', optionalAuth, handlers.getPublicProfile);
 
   return router;

@@ -115,6 +115,8 @@ model User {
   usernameChangedAt DateTime?
   /// Whether other users can see this user's liked SoundToks
   likedSoundToksPublic Boolean @default(false)
+  /// Whether other users can see this user's SoundTok reposts
+  repostedSoundToksPublic Boolean @default(false)
 
   // Subscription / tokens
   plan              PlanTier  @default(FREE)
@@ -141,6 +143,8 @@ model User {
   likes      Like[]
   commentVotes CommentVote[]
   postCommentVotes PostCommentVote[]
+  soundTokReposts SoundTokRepost[]
+  soundTokViews SoundTokView[]
   sentMessages Message[] @relation("SentMessages")
   receivedMessages Message[] @relation("ReceivedMessages")
   chatUsers   ChatUser[]
@@ -390,6 +394,8 @@ model SoundTok {
   soundId     String?
   likes       Int      @default(0)
   commentsCount Int    @default(0)
+  views       Int      @default(0)
+  repostsCount Int     @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -398,12 +404,45 @@ model SoundTok {
   originalForSound Sound? @relation("OriginalSound")
   comments    Comment[]
   likesList   Like[]
+  reposts     SoundTokRepost[]
+  viewsList   SoundTokView[]
   sharedMessages Message[]
 
   @@index([authorId, createdAt])
   @@index([createdAt])
   @@index([soundId, createdAt])
   @@map("sound_toks")
+}
+
+model SoundTokRepost {
+  id         String   @id @default(cuid())
+  userId     String
+  soundTokId String
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  soundTok SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, soundTokId])
+  @@index([userId, createdAt])
+  @@index([soundTokId])
+  @@map("sound_tok_reposts")
+}
+
+model SoundTokView {
+  id         String   @id @default(cuid())
+  userId     String?
+  soundTokId String
+  guestKey   String?
+  createdAt  DateTime @default(now())
+
+  user     User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  soundTok SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, soundTokId])
+  @@unique([guestKey, soundTokId])
+  @@index([soundTokId])
+  @@map("sound_tok_views")
 }
 
 model Sound {
