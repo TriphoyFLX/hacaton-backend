@@ -34,7 +34,7 @@ const chatListInclude = {
               select: {
                 id: true,
                 description: true,
-                videoUrl: true,
+                // videoUrl intentionally omitted from chat list — previews are text-only
                 authorId: true,
                 author: {
                   select: {
@@ -102,7 +102,21 @@ function scoreDirectChat(chat: ChatWithUsers, userId: string): number {
 }
 
 export class ChatRepository {
-  async getChatsByUserId(userId: string): Promise<ChatWithUsers[]> {
+  async getChatIdsForUser(userId: string): Promise<string[]> {
+    const rows = await prisma.chatUser.findMany({
+      where: { userId },
+      select: { chatId: true },
+    });
+    return rows.map((r) => r.chatId);
+  }
+
+  async getChatsByUserId(
+    userId: string,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<{ items: ChatWithUsers[]; total: number; hasMore: boolean; limit: number; offset: number }> {
+    const limit = Math.min(100, Math.max(1, options.limit ?? 40));
+    const offset = Math.max(0, options.offset ?? 0);
+
     // Merge any duplicate 1-1 chats before returning the list
     await this.mergeAllDuplicateDirectChatsForUser(userId);
 
@@ -127,7 +141,7 @@ export class ChatRepository {
       unique.push(chat);
     }
 
-    return unique.sort((a, b) => {
+    unique.sort((a, b) => {
       const aPinned = a.users.find((u) => u.userId === userId)?.pinnedAt;
       const bPinned = b.users.find((u) => u.userId === userId)?.pinnedAt;
 
@@ -138,6 +152,16 @@ export class ChatRepository {
       if (bPinned) return 1;
       return b.updatedAt.getTime() - a.updatedAt.getTime();
     });
+
+    const total = unique.length;
+    const items = unique.slice(offset, offset + limit);
+    return {
+      items,
+      total,
+      hasMore: offset + items.length < total,
+      limit,
+      offset,
+    };
   }
 
   async getChatById(chatId: string): Promise<ChatWithUsers | null> {

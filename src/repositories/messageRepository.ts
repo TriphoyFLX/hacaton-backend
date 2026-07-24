@@ -30,6 +30,22 @@ const messageInclude = {
       },
     },
   },
+  replyTo: {
+    select: {
+      id: true,
+      content: true,
+      senderId: true,
+      deletedAt: true,
+      soundTokId: true,
+      sender: {
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+        },
+      },
+    },
+  },
   reactions: {
     select: {
       id: true,
@@ -48,13 +64,26 @@ const messageInclude = {
 } as const;
 
 function sanitizeMessage(message: MessageWithSender): MessageWithSender {
-  if (!message.deletedAt) return message;
-  return {
-    ...message,
-    content: '',
-    soundTokId: null,
-    soundTok: null,
-  };
+  let result = message;
+  if (message.deletedAt) {
+    result = {
+      ...message,
+      content: '',
+      soundTokId: null,
+      soundTok: null,
+    };
+  }
+  if (result.replyTo?.deletedAt) {
+    result = {
+      ...result,
+      replyTo: {
+        ...result.replyTo,
+        content: '',
+        soundTokId: null,
+      },
+    };
+  }
+  return result;
 }
 
 export class MessageRepository {
@@ -68,6 +97,7 @@ export class MessageRepository {
     chatId: string;
     clientMessageId?: string;
     soundTokId?: string | null;
+    replyToId?: string | null;
   }): Promise<MessageWithSender | null> {
     // Check for duplicate message
     if (data.clientMessageId) {
@@ -92,6 +122,7 @@ export class MessageRepository {
         chatId: data.chatId,
         clientMessageId: data.clientMessageId,
         soundTokId: data.soundTokId || null,
+        replyToId: data.replyToId || null,
         status: MessageStatus.SENT,
       },
       include: messageInclude,
@@ -100,7 +131,8 @@ export class MessageRepository {
   }
 
   /**
-   * Get messages for a chat with pagination
+   * Get messages for a chat with pagination (newest page by default).
+   * Returns chronological order (oldest → newest) for UI rendering.
    */
   async getMessagesByChatId(
     chatId: string,
@@ -118,14 +150,19 @@ export class MessageRepository {
       where.createdAt = { lt: before };
     }
 
-    return (await prisma.message.findMany({
+    const rows = await prisma.message.findMany({
       where,
       take: limit,
       skip: cursor ? 1 : 0,
       cursor: cursor ? { id: cursor } : undefined,
-      orderBy: { createdAt: 'asc' },
+      // Newest first, then reverse so the UI gets oldest→newest for a page
+      orderBy: { createdAt: 'desc' },
       include: messageInclude,
-    })).map((message) => sanitizeMessage(message as MessageWithSender));
+    });
+
+    return rows
+      .reverse()
+      .map((message) => sanitizeMessage(message as MessageWithSender));
   }
 
   async softDeleteMessage(messageId: string, senderId: string, chatId: string): Promise<MessageWithSender | null> {

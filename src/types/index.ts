@@ -89,6 +89,19 @@ export interface MessageReactionSummary {
   };
 }
 
+export interface MessageReplyPreview {
+  id: string;
+  content: string;
+  senderId: string;
+  deletedAt?: Date | null;
+  soundTokId?: string | null;
+  sender: {
+    id: string;
+    username: string;
+    displayName?: string | null;
+  };
+}
+
 export interface MessageWithSender {
   id: string;
   content: string;
@@ -96,6 +109,7 @@ export interface MessageWithSender {
   receiverId?: string | null;
   chatId: string;
   soundTokId?: string | null;
+  replyToId?: string | null;
   clientMessageId?: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ';
   readAt?: Date | null;
@@ -110,6 +124,7 @@ export interface MessageWithSender {
     avatar?: string | null;
   };
   soundTok?: SharedSoundTokPreview | null;
+  replyTo?: MessageReplyPreview | null;
   reactions?: MessageReactionSummary[];
 }
 
@@ -119,6 +134,7 @@ export interface SendMessageData {
   clientMessageId: string;
   receiverId?: string;
   soundTokId?: string;
+  replyToId?: string;
 }
 
 export interface MessageResponse {

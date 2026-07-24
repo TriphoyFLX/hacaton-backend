@@ -211,6 +211,10 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           callback({ success: false, error: 'Invalid message metadata', clientMessageId: data.clientMessageId });
           return;
         }
+        if (data.replyToId != null && !isSafeIdentifier(data.replyToId)) {
+          callback({ success: false, error: 'Invalid replyToId', clientMessageId: data.clientMessageId });
+          return;
+        }
         const validation = validateMessageContent(data.content, {
           allowEmpty: !!data.soundTokId,
         });
@@ -255,6 +259,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           chatId: data.chatId,
           clientMessageId,
           soundTokId: data.soundTokId ?? null,
+          replyToId: data.replyToId ?? null,
         });
 
         if (!result.success || !result.message) {

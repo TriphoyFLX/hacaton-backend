@@ -66,14 +66,12 @@ export async function getUnreadTotal(req: AuthenticatedRequest, res: Response) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const chats = await chatService.getUserChats(req.user.id);
-    const unreadCounts = await chatService.getUnreadCounts(
-      req.user.id,
-      chats.map(chat => chat.id)
-    );
+    // Lightweight membership ids only — avoid loading full chat payloads
+    const memberships = await chatRepository.getChatIdsForUser(req.user.id);
+    const unreadCounts = await chatService.getUnreadCounts(req.user.id, memberships);
 
     let total = 0;
-    unreadCounts.forEach(count => {
+    unreadCounts.forEach((count) => {
       total += count;
     });
 
@@ -85,7 +83,7 @@ export async function getUnreadTotal(req: AuthenticatedRequest, res: Response) {
 }
 
 /**
- * Get all chats for current user
+ * Get chats for current user (paginated)
  */
 export async function getChats(req: AuthenticatedRequest, res: Response) {
   try {
@@ -93,17 +91,28 @@ export async function getChats(req: AuthenticatedRequest, res: Response) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const chats = await chatService.getUserChats(req.user.id);
+    const rawLimit = Number.parseInt(String(req.query.limit ?? '40'), 10);
+    const rawOffset = Number.parseInt(String(req.query.offset ?? '0'), 10);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 100) : 40;
+    const offset = Number.isFinite(rawOffset) ? Math.max(rawOffset, 0) : 0;
+
+    const page = await chatService.getUserChats(req.user.id, { limit, offset });
     const unreadCounts = await chatService.getUnreadCounts(
       req.user.id,
-      chats.map(chat => chat.id)
-    );
-    
-    const formattedChats = chats.map((chat) =>
-      formatChat(chat, req.user!.id, unreadCounts.get(chat.id) || 0)
+      page.items.map((chat) => chat.id),
     );
 
-    res.json(formattedChats);
+    const items = page.items.map((chat) =>
+      formatChat(chat, req.user!.id, unreadCounts.get(chat.id) || 0),
+    );
+
+    res.json({
+      items,
+      total: page.total,
+      hasMore: page.hasMore,
+      limit: page.limit,
+      offset: page.offset,
+    });
   } catch (error) {
     console.error('getChats error:', error);
     res.status(500).json({ error: 'Failed to fetch chats' });
@@ -258,7 +267,7 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     }
 
     const { chatId } = req.params;
-    const { content, clientMessageId, receiverId: bodyReceiverId, soundTokId } = req.body;
+    const { content, clientMessageId, receiverId: bodyReceiverId, soundTokId, replyToId } = req.body;
 
     const validation = validateMessageContent(content, {
       allowEmpty: !!soundTokId,
@@ -293,6 +302,10 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
 
     const receiverId = bodyReceiverId || await chatRepository.getOtherParticipant(chatId, req.user.id);
 
+    if (replyToId !== undefined && replyToId !== null && typeof replyToId !== 'string') {
+      return res.status(400).json({ error: 'Invalid replyToId' });
+    }
+
     const result = await chatService.sendMessage({
       content: validation.content ?? '',
       senderId: req.user.id,
@@ -300,6 +313,7 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
       chatId,
       clientMessageId: clientMessageId || `${req.user.id}_${Date.now()}`,
       soundTokId: typeof soundTokId === 'string' ? soundTokId : null,
+      replyToId: typeof replyToId === 'string' ? replyToId : null,
     });
 
     if (!result.success || !result.message) {

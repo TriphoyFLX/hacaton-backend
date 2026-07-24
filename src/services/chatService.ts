@@ -1,4 +1,4 @@
-import { ChatType } from '@prisma/client';
+import { ChatType, MessageStatus } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { messageRepository } from '../repositories/messageRepository';
 import { MessageWithSender } from '../types';
@@ -30,6 +30,7 @@ export class ChatService {
     chatId: string;
     clientMessageId: string;
     soundTokId?: string | null;
+    replyToId?: string | null;
   }): Promise<SendMessageResult> {
     try {
       const hasSoundTok = !!data.soundTokId;
@@ -54,6 +55,18 @@ export class ChatService {
           return { success: false, error: 'Видео не найдено' };
         }
         soundTokId = soundTok.id;
+      }
+
+      let replyToId: string | null = null;
+      if (data.replyToId) {
+        const replyTarget = await prisma.message.findFirst({
+          where: { id: data.replyToId, chatId: data.chatId },
+          select: { id: true },
+        });
+        if (!replyTarget) {
+          return { success: false, error: 'Сообщение для ответа не найдено' };
+        }
+        replyToId = replyTarget.id;
       }
 
       const chatMeta = await chatRepository.getChatMeta(data.chatId);
@@ -96,6 +109,7 @@ export class ChatService {
         chatId: data.chatId,
         clientMessageId: data.clientMessageId,
         soundTokId,
+        replyToId,
       });
 
       if (!message) {
@@ -133,8 +147,11 @@ export class ChatService {
     return { chat, messages, unreadCount };
   }
 
-  async getUserChats(userId: string): Promise<ChatWithUsers[]> {
-    return chatRepository.getChatsByUserId(userId);
+  async getUserChats(
+    userId: string,
+    options: { limit?: number; offset?: number } = {},
+  ) {
+    return chatRepository.getChatsByUserId(userId, options);
   }
 
   async createOrGetChat(userId1: string, userId2: string): Promise<ChatWithUsers | null> {
@@ -280,12 +297,59 @@ export class ChatService {
 
   async getUnreadCounts(userId: string, chatIds: string[]): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
-    await Promise.all(
-      chatIds.map(async (chatId) => {
-        const count = await messageRepository.getUnreadCount(chatId, userId);
-        counts.set(chatId, count);
-      })
-    );
+    if (chatIds.length === 0) return counts;
+
+    const memberships = await prisma.chatUser.findMany({
+      where: { userId, chatId: { in: chatIds } },
+      select: {
+        chatId: true,
+        lastReadAt: true,
+        chat: { select: { type: true } },
+      },
+    });
+
+    const directIds: string[] = [];
+    const groupMeta: Array<{ chatId: string; lastReadAt: Date | null }> = [];
+    for (const row of memberships) {
+      if (row.chat.type === 'GROUP') {
+        groupMeta.push({ chatId: row.chatId, lastReadAt: row.lastReadAt ?? null });
+      } else {
+        directIds.push(row.chatId);
+      }
+    }
+
+    if (directIds.length > 0) {
+      const directCounts = await prisma.message.groupBy({
+        by: ['chatId'],
+        where: {
+          chatId: { in: directIds },
+          receiverId: userId,
+          deletedAt: null,
+          status: { in: [MessageStatus.SENT, MessageStatus.DELIVERED] },
+        },
+        _count: { _all: true },
+      });
+      for (const row of directCounts) {
+        counts.set(row.chatId, row._count._all);
+      }
+    }
+
+    if (groupMeta.length > 0) {
+      await Promise.all(
+        groupMeta.map(async ({ chatId, lastReadAt }) => {
+          const count = await prisma.message.count({
+            where: {
+              chatId,
+              senderId: { not: userId },
+              deletedAt: null,
+              createdAt: { gt: lastReadAt ?? new Date(0) },
+            },
+          });
+          counts.set(chatId, count);
+        }),
+      );
+    }
+
     return counts;
   }
 
