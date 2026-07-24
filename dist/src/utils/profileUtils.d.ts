@@ -7,6 +7,7 @@ export interface ProfileJson {
     displayName?: string | null;
     avatar?: string | null;
     bio?: string | null;
+    usernameChangeAvailableAt?: string | null;
     birthDate?: string;
     role?: string;
     createdAt: string;
@@ -37,6 +38,7 @@ export declare function serializeProfile(user: {
     displayName?: string | null;
     avatar?: string | null;
     bio?: string | null;
+    usernameChangedAt?: Date | null;
     birthDate?: Date | null;
     role?: string;
     createdAt: Date;

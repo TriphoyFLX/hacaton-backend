@@ -39,6 +39,11 @@ function serializeProfile(user, options = {}) {
     if (isPrivate && user.birthDate) {
         result.birthDate = user.birthDate.toISOString();
     }
+    if (isPrivate) {
+        result.usernameChangeAvailableAt = user.usernameChangedAt
+            ? new Date(user.usernameChangedAt.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString()
+            : null;
+    }
     if (user.role) {
         result.role = user.role;
     }

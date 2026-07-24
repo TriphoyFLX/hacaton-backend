@@ -9,6 +9,7 @@ export interface UserProfile {
   displayName?: string | null;
   avatar?: string | null;
   bio?: string | null;
+  usernameChangedAt?: Date | null;
   birthDate?: Date;
   role: string;
   emailVerified?: boolean;
@@ -21,6 +22,7 @@ export interface UserProfile {
 }
 
 export interface UpdateUserData {
+  username?: string;
   displayName?: string;
   bio?: string;
   avatar?: string | null;
@@ -40,6 +42,7 @@ export class UserRepository {
         displayName: true,
         avatar: true,
         bio: true,
+        usernameChangedAt: true,
         birthDate: true,
         role: true,
         emailVerified: true,
@@ -81,6 +84,11 @@ export class UserRepository {
   async updateProfile(userId: string, data: UpdateUserData): Promise<UserProfile | null> {
     const updateData: any = {};
 
+    if (data.username !== undefined) {
+      updateData.username = data.username;
+      updateData.usernameChangedAt = new Date();
+    }
+
     if (data.displayName !== undefined) {
       updateData.displayName = data.displayName.trim() || null;
     }
@@ -103,6 +111,7 @@ export class UserRepository {
         displayName: true,
         avatar: true,
         bio: true,
+        usernameChangedAt: true,
         birthDate: true,
         role: true,
         createdAt: true,
@@ -129,7 +138,9 @@ export class UserRepository {
    * Check if username is taken (excluding current user)
    */
   async isUsernameTaken(username: string, excludeUserId?: string): Promise<boolean> {
-    const where: any = { username };
+    const where: any = {
+      username: { equals: username, mode: 'insensitive' },
+    };
     
     if (excludeUserId) {
       where.id = { not: excludeUserId };

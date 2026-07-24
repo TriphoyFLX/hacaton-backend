@@ -3,6 +3,13 @@ import { followService } from './followService';
 import { z } from 'zod';
 
 // Validation schemas
+const usernameSchema = z
+  .string()
+  .trim()
+  .min(3, 'Юзернейм должен содержать минимум 3 символа')
+  .max(30, 'Юзернейм должен быть не длиннее 30 символов')
+  .regex(/^[a-zA-Z0-9_]+$/, 'Используйте только латинские буквы, цифры и _');
+
 const displayNameSchema = z
   .string()
   .min(1, 'Имя слишком короткое')
@@ -17,6 +24,8 @@ const avatarSchema = z
   .string()
   .regex(/^\/uploads\//, 'Некорректный путь к аватару')
   .max(500, 'Путь к аватару слишком длинный');
+
+const USERNAME_CHANGE_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface ValidationError {
   field: string;
@@ -58,6 +67,48 @@ export class ProfileService {
     data: UpdateUserData
   ): Promise<UpdateProfileResult> {
     const errors: ValidationError[] = [];
+    const updateData: UpdateUserData = { ...data };
+
+    if (data.username !== undefined) {
+      const normalizedUsername = data.username.trim();
+      const result = usernameSchema.safeParse(normalizedUsername);
+      if (!result.success) {
+        errors.push({
+          field: 'username',
+          message: result.error.errors[0]?.message || 'Некорректный юзернейм',
+        });
+      } else {
+        const currentUser = await userRepository.getUserById(userId);
+        if (!currentUser) {
+          return { success: false, error: 'Пользователь не найден' };
+        }
+
+        if (normalizedUsername.toLowerCase() === currentUser.username.toLowerCase()) {
+          delete updateData.username;
+        } else {
+          if (currentUser.usernameChangedAt) {
+            const nextChangeAt = new Date(
+              currentUser.usernameChangedAt.getTime() + USERNAME_CHANGE_COOLDOWN_MS,
+            );
+            if (nextChangeAt.getTime() > Date.now()) {
+              errors.push({
+                field: 'username',
+                message: `Следующая смена доступна ${nextChangeAt.toLocaleDateString('ru-RU')}`,
+              });
+            }
+          }
+
+          if (!errors.some((item) => item.field === 'username')) {
+            const isTaken = await userRepository.isUsernameTaken(normalizedUsername, userId);
+            if (isTaken) {
+              errors.push({ field: 'username', message: 'Этот юзернейм уже занят' });
+            } else {
+              updateData.username = normalizedUsername;
+            }
+          }
+        }
+      }
+    }
 
     // Validate displayName
     if (data.displayName !== undefined) {
@@ -97,7 +148,7 @@ export class ProfileService {
     }
 
     try {
-      const user = await userRepository.updateProfile(userId, data);
+      const user = await userRepository.updateProfile(userId, updateData);
       
       if (!user) {
         return { success: false, error: 'Пользователь не найден' };
@@ -106,6 +157,12 @@ export class ProfileService {
       return { success: true, user };
     } catch (error) {
       console.error('ProfileService.updateProfile error:', error);
+      if ((error as { code?: string }).code === 'P2002') {
+        return {
+          success: false,
+          errors: [{ field: 'username', message: 'Этот юзернейм уже занят' }],
+        };
+      }
       return { success: false, error: 'Ошибка при обновлении профиля' };
     }
   }

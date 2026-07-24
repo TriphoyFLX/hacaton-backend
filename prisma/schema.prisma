@@ -107,6 +107,7 @@ model User {
   displayName String?
   avatar      String?
   bio         String?   @db.Text
+  usernameChangedAt DateTime?
 
   // Subscription / tokens
   plan              PlanTier  @default(FREE)

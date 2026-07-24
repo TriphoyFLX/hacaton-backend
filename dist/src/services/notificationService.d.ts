@@ -42,5 +42,6 @@ export declare const notificationService: {
         unreadCount: number;
     }>;
     markRead(userId: string, ids?: string[]): Promise<number>;
+    clear(userId: string): Promise<number>;
 };
 //# sourceMappingURL=notificationService.d.ts.map

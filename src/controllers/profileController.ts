@@ -60,9 +60,10 @@ export function createProfileHandlers(uploadsDir: string) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
-      const { displayName, bio } = req.body;
+      const { username, displayName, bio } = req.body;
 
       const result = await profileService.updateProfile(req.user.id, {
+        username,
         displayName,
         bio,
       });

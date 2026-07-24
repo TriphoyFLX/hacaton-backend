@@ -23,6 +23,7 @@ export interface ProfileJson {
   displayName?: string | null;
   avatar?: string | null;
   bio?: string | null;
+  usernameChangeAvailableAt?: string | null;
   birthDate?: string;
   role?: string;
   createdAt: string;
@@ -55,6 +56,7 @@ export function serializeProfile(
     displayName?: string | null;
     avatar?: string | null;
     bio?: string | null;
+    usernameChangedAt?: Date | null;
     birthDate?: Date | null;
     role?: string;
     createdAt: Date;
@@ -90,6 +92,12 @@ export function serializeProfile(
 
   if (isPrivate && user.birthDate) {
     result.birthDate = user.birthDate.toISOString();
+  }
+
+  if (isPrivate) {
+    result.usernameChangeAvailableAt = user.usernameChangedAt
+      ? new Date(user.usernameChangedAt.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString()
+      : null;
   }
 
   if (user.role) {

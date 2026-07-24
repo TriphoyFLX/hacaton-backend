@@ -8,8 +8,12 @@ export declare function exchangeGoogleCode(code: string): Promise<{
     picture?: string;
     googleId: string;
 }>;
-export declare function vkAuthUrl(state: string): string;
-export declare function exchangeVkCode(code: string): Promise<{
+export declare function vkPkce(): {
+    verifier: string;
+    challenge: string;
+};
+export declare function vkAuthUrl(state: string, codeChallenge: string): string;
+export declare function exchangeVkCode(code: string, deviceId: string, codeVerifier: string, state: string): Promise<{
     email: string;
     name?: string;
     picture?: string;
@@ -37,6 +41,7 @@ export declare function findOrCreateOAuthUser(input: {
     displayName: string | null;
     avatar: string | null;
     bio: string | null;
+    usernameChangedAt: Date | null;
     plan: import(".prisma/client").$Enums.PlanTier;
     planExpiresAt: Date | null;
     tokenBalance: number;

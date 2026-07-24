@@ -53,8 +53,9 @@ function createProfileHandlers(uploadsDir) {
             if (!req.user) {
                 return res.status(401).json({ error: 'Unauthorized' });
             }
-            const { displayName, bio } = req.body;
+            const { username, displayName, bio } = req.body;
             const result = await profileService_1.profileService.updateProfile(req.user.id, {
+                username,
                 displayName,
                 bio,
             });

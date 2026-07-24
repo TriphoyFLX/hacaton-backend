@@ -17,6 +17,7 @@ class UserRepository {
                 displayName: true,
                 avatar: true,
                 bio: true,
+                usernameChangedAt: true,
                 birthDate: true,
                 role: true,
                 emailVerified: true,
@@ -48,6 +49,10 @@ class UserRepository {
     }
     async updateProfile(userId, data) {
         const updateData = {};
+        if (data.username !== undefined) {
+            updateData.username = data.username;
+            updateData.usernameChangedAt = new Date();
+        }
         if (data.displayName !== undefined) {
             updateData.displayName = data.displayName.trim() || null;
         }
@@ -67,6 +72,7 @@ class UserRepository {
                 displayName: true,
                 avatar: true,
                 bio: true,
+                usernameChangedAt: true,
                 birthDate: true,
                 role: true,
                 createdAt: true,
@@ -83,7 +89,9 @@ class UserRepository {
         });
     }
     async isUsernameTaken(username, excludeUserId) {
-        const where = { username };
+        const where = {
+            username: { equals: username, mode: 'insensitive' },
+        };
         if (excludeUserId) {
             where.id = { not: excludeUserId };
         }

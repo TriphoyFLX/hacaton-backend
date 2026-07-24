@@ -4,6 +4,12 @@ exports.profileService = exports.ProfileService = void 0;
 const userRepository_1 = require("../repositories/userRepository");
 const followService_1 = require("./followService");
 const zod_1 = require("zod");
+const usernameSchema = zod_1.z
+    .string()
+    .trim()
+    .min(3, 'Юзернейм должен содержать минимум 3 символа')
+    .max(30, 'Юзернейм должен быть не длиннее 30 символов')
+    .regex(/^[a-zA-Z0-9_]+$/, 'Используйте только латинские буквы, цифры и _');
 const displayNameSchema = zod_1.z
     .string()
     .min(1, 'Имя слишком короткое')
@@ -16,6 +22,7 @@ const avatarSchema = zod_1.z
     .string()
     .regex(/^\/uploads\//, 'Некорректный путь к аватару')
     .max(500, 'Путь к аватару слишком длинный');
+const USERNAME_CHANGE_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
 class ProfileService {
     async getProfile(userId) {
         return userRepository_1.userRepository.getUserById(userId);
@@ -32,6 +39,46 @@ class ProfileService {
     }
     async updateProfile(userId, data) {
         const errors = [];
+        const updateData = { ...data };
+        if (data.username !== undefined) {
+            const normalizedUsername = data.username.trim();
+            const result = usernameSchema.safeParse(normalizedUsername);
+            if (!result.success) {
+                errors.push({
+                    field: 'username',
+                    message: result.error.errors[0]?.message || 'Некорректный юзернейм',
+                });
+            }
+            else {
+                const currentUser = await userRepository_1.userRepository.getUserById(userId);
+                if (!currentUser) {
+                    return { success: false, error: 'Пользователь не найден' };
+                }
+                if (normalizedUsername.toLowerCase() === currentUser.username.toLowerCase()) {
+                    delete updateData.username;
+                }
+                else {
+                    if (currentUser.usernameChangedAt) {
+                        const nextChangeAt = new Date(currentUser.usernameChangedAt.getTime() + USERNAME_CHANGE_COOLDOWN_MS);
+                        if (nextChangeAt.getTime() > Date.now()) {
+                            errors.push({
+                                field: 'username',
+                                message: `Следующая смена доступна ${nextChangeAt.toLocaleDateString('ru-RU')}`,
+                            });
+                        }
+                    }
+                    if (!errors.some((item) => item.field === 'username')) {
+                        const isTaken = await userRepository_1.userRepository.isUsernameTaken(normalizedUsername, userId);
+                        if (isTaken) {
+                            errors.push({ field: 'username', message: 'Этот юзернейм уже занят' });
+                        }
+                        else {
+                            updateData.username = normalizedUsername;
+                        }
+                    }
+                }
+            }
+        }
         if (data.displayName !== undefined) {
             const result = displayNameSchema.safeParse(data.displayName);
             if (!result.success) {
@@ -63,7 +110,7 @@ class ProfileService {
             return { success: false, errors };
         }
         try {
-            const user = await userRepository_1.userRepository.updateProfile(userId, data);
+            const user = await userRepository_1.userRepository.updateProfile(userId, updateData);
             if (!user) {
                 return { success: false, error: 'Пользователь не найден' };
             }
@@ -71,6 +118,12 @@ class ProfileService {
         }
         catch (error) {
             console.error('ProfileService.updateProfile error:', error);
+            if (error.code === 'P2002') {
+                return {
+                    success: false,
+                    errors: [{ field: 'username', message: 'Этот юзернейм уже занят' }],
+                };
+            }
             return { success: false, error: 'Ошибка при обновлении профиля' };
         }
     }

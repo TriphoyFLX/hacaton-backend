@@ -193,6 +193,7 @@ function signAuthToken(userId, role) {
     return jsonwebtoken_1.default.sign({ userId, ...(role ? { role } : {}) }, JWT_SECRET, { expiresIn });
 }
 const OAUTH_STATE_COOKIE = 'soundlab_oauth_state';
+const VK_PKCE_COOKIE = 'soundlab_vk_pkce';
 function parseCookie(req, name) {
     const cookieHeader = req.headers.cookie;
     if (!cookieHeader)
@@ -224,14 +225,52 @@ function clearOAuthStateCookie(res) {
         path: '/api/auth',
     });
 }
-function hasValidOAuthState(req) {
-    const queryState = typeof req.query.state === 'string' ? req.query.state : '';
+function setVkPkceCookie(res, verifier) {
+    res.cookie(VK_PKCE_COOKIE, verifier, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: 10 * 60 * 1000,
+        path: '/api/auth',
+    });
+}
+function clearVkPkceCookie(res) {
+    res.clearCookie(VK_PKCE_COOKIE, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/api/auth',
+    });
+}
+function hasValidOAuthState(req, providedState) {
+    const queryState = providedState
+        ?? (typeof req.query.state === 'string' ? req.query.state : '');
     const cookieState = parseCookie(req, OAUTH_STATE_COOKIE) || '';
     const queryBuffer = Buffer.from(queryState);
     const cookieBuffer = Buffer.from(cookieState);
     return queryBuffer.length > 0
         && queryBuffer.length === cookieBuffer.length
         && crypto_1.default.timingSafeEqual(queryBuffer, cookieBuffer);
+}
+function vkCallbackParams(req) {
+    let source = req.query;
+    if (typeof req.query.payload === 'string') {
+        const payload = JSON.parse(req.query.payload);
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            source = payload;
+        }
+    }
+    const value = (key) => typeof source[key] === 'string' ? source[key] : '';
+    return {
+        code: value('code'),
+        state: value('state'),
+        deviceId: value('device_id'),
+        error: value('error') || value('error_description'),
+    };
+}
+function isVkOAuthConfigured() {
+    return Boolean(process.env.VK_CLIENT_ID
+        && (process.env.VK_SERVICE_TOKEN || process.env.VK_CLIENT_SECRET));
 }
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -459,7 +498,7 @@ app.get('/api/auth/me', async (req, res) => {
 app.get('/api/auth/providers', (_req, res) => {
     res.json({
         google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
-        vk: Boolean(process.env.VK_CLIENT_ID && process.env.VK_CLIENT_SECRET),
+        vk: isVkOAuthConfigured(),
     });
 });
 app.get('/api/auth/google', (_req, res) => {
@@ -497,25 +536,30 @@ app.get('/api/auth/google/callback', async (req, res) => {
     }
 });
 app.get('/api/auth/vk', (_req, res) => {
-    if (!process.env.VK_CLIENT_ID || !process.env.VK_CLIENT_SECRET) {
+    if (!isVkOAuthConfigured()) {
         return res.status(503).json({ error: 'VK OAuth is not configured' });
     }
     const state = (0, oauthService_1.oauthState)();
+    const { verifier, challenge } = (0, oauthService_1.vkPkce)();
     setOAuthStateCookie(res, state);
-    res.redirect((0, oauthService_1.vkAuthUrl)(state));
+    setVkPkceCookie(res, verifier);
+    res.redirect((0, oauthService_1.vkAuthUrl)(state, challenge));
 });
 app.get('/api/auth/vk/callback', async (req, res) => {
     try {
-        if (!hasValidOAuthState(req)) {
+        const callback = vkCallbackParams(req);
+        const codeVerifier = parseCookie(req, VK_PKCE_COOKIE) || '';
+        if (!hasValidOAuthState(req, callback.state) || !codeVerifier) {
             clearOAuthStateCookie(res);
+            clearVkPkceCookie(res);
             return res.redirect(`${(0, oauthService_1.frontendUrl)()}/login?error=oauth_state`);
         }
         clearOAuthStateCookie(res);
-        const code = typeof req.query.code === 'string' ? req.query.code : '';
-        if (!code) {
+        clearVkPkceCookie(res);
+        if (callback.error || !callback.code || !callback.deviceId) {
             return res.redirect(`${(0, oauthService_1.frontendUrl)()}/login?error=vk_denied`);
         }
-        const profile = await (0, oauthService_1.exchangeVkCode)(code);
+        const profile = await (0, oauthService_1.exchangeVkCode)(callback.code, callback.deviceId, codeVerifier, callback.state);
         const user = await (0, oauthService_1.findOrCreateOAuthUser)({
             email: profile.email,
             name: profile.name,
@@ -793,6 +837,16 @@ app.patch('/api/notifications/read', authenticateToken, async (req, res) => {
     catch (error) {
         console.error('Failed to mark notifications as read:', error);
         res.status(500).json({ error: 'Failed to update notifications' });
+    }
+});
+app.delete('/api/notifications', authenticateToken, async (req, res) => {
+    try {
+        const deletedCount = await notificationService_1.notificationService.clear(req.user.id);
+        res.json({ deletedCount, unreadCount: 0 });
+    }
+    catch (error) {
+        console.error('Failed to clear notifications:', error);
+        res.status(500).json({ error: 'Failed to clear notifications' });
     }
 });
 app.post('/api/posts', upload.array('media', 10), async (req, res) => {
@@ -1470,8 +1524,15 @@ const parseAdminPage = (req) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
     return { take, skip, q };
 };
-app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
+const ADMIN_STATS_CACHE_TTL_MS = 30000;
+let adminStatsCache = null;
+app.get('/api/admin/stats', requireAdmin, asyncRoute(async (req, res) => {
     var _a;
+    const forceRefresh = req.query.refresh === '1';
+    if (!forceRefresh && adminStatsCache && adminStatsCache.expiresAt > Date.now()) {
+        res.setHeader('X-Admin-Stats-Cache', 'HIT');
+        return res.json(adminStatsCache.value);
+    }
     const now = new Date();
     const dayMs = 24 * 60 * 60 * 1000;
     const since7d = new Date(now.getTime() - 7 * dayMs);
@@ -1635,7 +1696,7 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
             slot.canceled += 1;
         }
     }
-    res.json({
+    const response = {
         totals: {
             users: usersCount,
             posts: postsCount,
@@ -1692,7 +1753,13 @@ app.get('/api/admin/stats', requireAdmin, asyncRoute(async (_req, res) => {
             payments: recentPayments,
             presetPurchases: recentPresetPurchases,
         },
-    });
+    };
+    adminStatsCache = {
+        expiresAt: Date.now() + ADMIN_STATS_CACHE_TTL_MS,
+        value: response,
+    };
+    res.setHeader('X-Admin-Stats-Cache', 'MISS');
+    res.json(response);
 }));
 app.get('/api/admin/payments', requireAdmin, asyncRoute(async (req, res) => {
     const { take, skip } = parseAdminPage(req);

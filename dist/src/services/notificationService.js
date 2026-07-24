@@ -43,5 +43,9 @@ exports.notificationService = {
         await prisma_1.prisma.notification.updateMany({ where, data: { readAt: new Date() } });
         return prisma_1.prisma.notification.count({ where: { userId, readAt: null } });
     },
+    async clear(userId) {
+        const result = await prisma_1.prisma.notification.deleteMany({ where: { userId } });
+        return result.count;
+    },
 };
 //# sourceMappingURL=notificationService.js.map

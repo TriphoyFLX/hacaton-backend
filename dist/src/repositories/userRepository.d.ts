@@ -5,6 +5,7 @@ export interface UserProfile {
     displayName?: string | null;
     avatar?: string | null;
     bio?: string | null;
+    usernameChangedAt?: Date | null;
     birthDate?: Date;
     role: string;
     emailVerified?: boolean;
@@ -16,6 +17,7 @@ export interface UserProfile {
     battleDraws?: number;
 }
 export interface UpdateUserData {
+    username?: string;
     displayName?: string;
     bio?: string;
     avatar?: string | null;
