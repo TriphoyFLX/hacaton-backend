@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "sound_toks" ADD COLUMN IF NOT EXISTS "sharesCount" INTEGER NOT NULL DEFAULT 0;

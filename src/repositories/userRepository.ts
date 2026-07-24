@@ -284,6 +284,7 @@ export class UserRepository {
       commentsCount: true,
       views: true,
       repostsCount: true,
+      sharesCount: true,
       createdAt: true,
       updatedAt: true,
       author: {

@@ -1902,6 +1902,7 @@ app.get('/api/soundtok', async (req, res) => {
           commentsCount: true,
           views: true,
           repostsCount: true,
+          sharesCount: true,
           createdAt: true,
           updatedAt: true,
           author: { select: authorPreviewSelect },
@@ -1967,6 +1968,7 @@ app.get('/api/soundtok/:id', async (req, res) => {
         commentsCount: true,
         views: true,
         repostsCount: true,
+        sharesCount: true,
         createdAt: true,
         updatedAt: true,
         author: { select: authorPreviewSelect },
@@ -2437,6 +2439,31 @@ app.get('/api/soundtok/:id/reposts', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to fetch reposts' });
+  }
+});
+
+// Record SoundTok share (copy link / send to chat)
+app.post('/api/soundtok/:id/share', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const soundTok = await prisma.soundTok.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, sharesCount: true },
+    });
+    if (!soundTok) return res.status(404).json({ error: 'SoundTok not found' });
+
+    const updated = await prisma.soundTok.update({
+      where: { id: soundTok.id },
+      data: { sharesCount: { increment: 1 } },
+      select: { id: true, sharesCount: true },
+    });
+
+    res.json(updated);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to record share' });
   }
 });
 
