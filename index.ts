@@ -43,6 +43,7 @@ import {
   googleAuthUrl,
   oauthState,
   vkAuthUrl,
+  vkPkce,
 } from './src/services/oauthService';
 import { createChatRouter } from './src/routes/chatRoutes';
 import { createBlockRouter } from './src/routes/blockRoutes';
@@ -241,6 +242,7 @@ function signAuthToken(userId: string, role?: string) {
 }
 
 const OAUTH_STATE_COOKIE = 'soundlab_oauth_state';
+const VK_PKCE_COOKIE = 'soundlab_vk_pkce';
 
 function parseCookie(req: Request, name: string): string | null {
   const cookieHeader = req.headers.cookie;
@@ -274,14 +276,63 @@ function clearOAuthStateCookie(res: Response): void {
   });
 }
 
-function hasValidOAuthState(req: Request): boolean {
-  const queryState = typeof req.query.state === 'string' ? req.query.state : '';
+function setVkPkceCookie(res: Response, verifier: string): void {
+  res.cookie(VK_PKCE_COOKIE, verifier, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 10 * 60 * 1000,
+    path: '/api/auth',
+  });
+}
+
+function clearVkPkceCookie(res: Response): void {
+  res.clearCookie(VK_PKCE_COOKIE, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/api/auth',
+  });
+}
+
+function hasValidOAuthState(req: Request, providedState?: string): boolean {
+  const queryState = providedState
+    ?? (typeof req.query.state === 'string' ? req.query.state : '');
   const cookieState = parseCookie(req, OAUTH_STATE_COOKIE) || '';
   const queryBuffer = Buffer.from(queryState);
   const cookieBuffer = Buffer.from(cookieState);
   return queryBuffer.length > 0
     && queryBuffer.length === cookieBuffer.length
     && crypto.timingSafeEqual(queryBuffer, cookieBuffer);
+}
+
+function vkCallbackParams(req: Request): {
+  code: string;
+  state: string;
+  deviceId: string;
+  error: string;
+} {
+  let source: Record<string, unknown> = req.query;
+  if (typeof req.query.payload === 'string') {
+    const payload = JSON.parse(req.query.payload) as unknown;
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      source = payload as Record<string, unknown>;
+    }
+  }
+  const value = (key: string) => typeof source[key] === 'string' ? source[key] as string : '';
+  return {
+    code: value('code'),
+    state: value('state'),
+    deviceId: value('device_id'),
+    error: value('error') || value('error_description'),
+  };
+}
+
+function isVkOAuthConfigured(): boolean {
+  return Boolean(
+    process.env.VK_CLIENT_ID
+    && (process.env.VK_SERVICE_TOKEN || process.env.VK_CLIENT_SECRET),
+  );
 }
 
 function isValidEmail(email: string): boolean {
@@ -549,7 +600,7 @@ app.get('/api/auth/me', async (req, res) => {
 app.get('/api/auth/providers', (_req, res) => {
   res.json({
     google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
-    vk: Boolean(process.env.VK_CLIENT_ID && process.env.VK_CLIENT_SECRET),
+    vk: isVkOAuthConfigured(),
   });
 });
 
@@ -589,26 +640,36 @@ app.get('/api/auth/google/callback', async (req, res) => {
 });
 
 app.get('/api/auth/vk', (_req, res) => {
-  if (!process.env.VK_CLIENT_ID || !process.env.VK_CLIENT_SECRET) {
+  if (!isVkOAuthConfigured()) {
     return res.status(503).json({ error: 'VK OAuth is not configured' });
   }
   const state = oauthState();
+  const { verifier, challenge } = vkPkce();
   setOAuthStateCookie(res, state);
-  res.redirect(vkAuthUrl(state));
+  setVkPkceCookie(res, verifier);
+  res.redirect(vkAuthUrl(state, challenge));
 });
 
 app.get('/api/auth/vk/callback', async (req, res) => {
   try {
-    if (!hasValidOAuthState(req)) {
+    const callback = vkCallbackParams(req);
+    const codeVerifier = parseCookie(req, VK_PKCE_COOKIE) || '';
+    if (!hasValidOAuthState(req, callback.state) || !codeVerifier) {
       clearOAuthStateCookie(res);
+      clearVkPkceCookie(res);
       return res.redirect(`${frontendUrl()}/login?error=oauth_state`);
     }
     clearOAuthStateCookie(res);
-    const code = typeof req.query.code === 'string' ? req.query.code : '';
-    if (!code) {
+    clearVkPkceCookie(res);
+    if (callback.error || !callback.code || !callback.deviceId) {
       return res.redirect(`${frontendUrl()}/login?error=vk_denied`);
     }
-    const profile = await exchangeVkCode(code);
+    const profile = await exchangeVkCode(
+      callback.code,
+      callback.deviceId,
+      codeVerifier,
+      callback.state,
+    );
     const user = await findOrCreateOAuthUser({
       email: profile.email,
       name: profile.name,

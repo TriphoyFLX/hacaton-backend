@@ -89,38 +89,57 @@ export async function exchangeGoogleCode(code: string): Promise<{
   };
 }
 
-export function vkAuthUrl(state: string): string {
+export function vkPkce(): { verifier: string; challenge: string } {
+  const verifier = crypto.randomBytes(48).toString('base64url');
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  return { verifier, challenge };
+}
+
+export function vkAuthUrl(state: string, codeChallenge: string): string {
   const clientId = process.env.VK_CLIENT_ID!;
   const redirectUri = `${backendUrl()}/api/auth/vk/callback`;
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: 'email',
+    scope: 'vkid.personal_info email',
     state,
-    v: '5.199',
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
   });
-  return `https://oauth.vk.com/authorize?${params}`;
+  return `https://id.vk.ru/authorize?${params}`;
 }
 
-export async function exchangeVkCode(code: string): Promise<{
+export async function exchangeVkCode(
+  code: string,
+  deviceId: string,
+  codeVerifier: string,
+  state: string,
+): Promise<{
   email: string;
   name?: string;
   picture?: string;
   vkId: string;
 }> {
   const clientId = process.env.VK_CLIENT_ID!;
-  const clientSecret = process.env.VK_CLIENT_SECRET!;
   const redirectUri = `${backendUrl()}/api/auth/vk/callback`;
+  const serviceToken = process.env.VK_SERVICE_TOKEN || process.env.VK_CLIENT_SECRET;
+  const tokenBody = new URLSearchParams({
+    grant_type: 'authorization_code',
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    code,
+    code_verifier: codeVerifier,
+    device_id: deviceId,
+    state,
+  });
+  if (serviceToken) tokenBody.set('service_token', serviceToken);
 
-  const tokenRes = await fetch(
-    `https://oauth.vk.com/access_token?${new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      code,
-    })}`
-  );
+  const tokenRes = await fetch('https://id.vk.ru/oauth2/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: tokenBody,
+  });
 
   if (!tokenRes.ok) {
     const err = await tokenRes.text();
@@ -129,43 +148,52 @@ export async function exchangeVkCode(code: string): Promise<{
 
   const tokens = await tokenRes.json() as {
     access_token?: string;
-    user_id?: number;
-    email?: string;
+    user_id?: string;
     error?: string;
     error_description?: string;
   };
 
-  if (tokens.error || !tokens.access_token || !tokens.user_id) {
+  if (tokens.error || !tokens.access_token) {
     throw new Error(tokens.error_description || tokens.error || 'VK auth failed');
   }
 
-  const profileRes = await fetch(
-    `https://api.vk.com/method/users.get?${new URLSearchParams({
+  const profileRes = await fetch('https://id.vk.ru/oauth2/user_info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
       access_token: tokens.access_token,
-      user_ids: String(tokens.user_id),
-      fields: 'photo_200',
-      v: '5.199',
-    })}`
-  );
+      client_id: clientId,
+    }),
+  });
 
   const profileJson = await profileRes.json() as {
-    response?: Array<{ id: number; first_name?: string; last_name?: string; photo_200?: string }>;
-    error?: { error_msg?: string };
+    user?: {
+      user_id?: string;
+      first_name?: string;
+      last_name?: string;
+      avatar?: string;
+      email?: string;
+    };
+    error?: string;
+    error_description?: string;
   };
 
-  if (profileJson.error || !profileJson.response?.[0]) {
-    throw new Error(profileJson.error?.error_msg || 'Failed to fetch VK profile');
+  if (!profileRes.ok || profileJson.error || !profileJson.user?.user_id) {
+    throw new Error(
+      profileJson.error_description || profileJson.error || 'Failed to fetch VK profile',
+    );
   }
 
-  const u = profileJson.response[0];
-  const email = (tokens.email || `vk_${tokens.user_id}@vk.soundlab.local`).toLowerCase();
+  const u = profileJson.user;
+  const vkId = u.user_id!;
+  const email = (u.email || `vk_${vkId}@vk.soundlab.local`).toLowerCase();
   const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || undefined;
 
   return {
     email,
     name,
-    picture: u.photo_200,
-    vkId: String(tokens.user_id),
+    picture: u.avatar,
+    vkId,
   };
 }
 
