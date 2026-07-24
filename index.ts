@@ -1213,7 +1213,7 @@ const requireAdmin = async (req: AuthenticatedRequest, res: any, next: any) => {
 
 app.use('/api/profile', createProfileRouter(authenticateToken, uploadsDir));
 app.use('/api/follows', createFollowRouter(authenticateToken));
-app.use('/api/chats', createChatRouter(authenticateToken));
+app.use('/api/chats', createChatRouter(authenticateToken, uploadsDir));
 app.use('/api/blocks', createBlockRouter(authenticateToken));
 app.use('/api/presets', createPresetRouter(prisma, authenticateToken, uploadsDir, privatePresetsDir));
 

@@ -110,6 +110,7 @@ export interface MessageWithSender {
   chatId: string;
   soundTokId?: string | null;
   replyToId?: string | null;
+  imageUrl?: string | null;
   clientMessageId?: string | null;
   status: 'SENT' | 'DELIVERED' | 'READ';
   readAt?: Date | null;
@@ -135,6 +136,7 @@ export interface SendMessageData {
   receiverId?: string;
   soundTokId?: string;
   replyToId?: string;
+  imageUrl?: string;
 }
 
 export interface MessageResponse {

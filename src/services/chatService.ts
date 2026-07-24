@@ -1,4 +1,6 @@
-import { ChatType, MessageStatus } from '@prisma/client';
+import { ChatType, ChatMemberRole, MessageStatus } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
 import { prisma } from '../lib/prisma';
 import { messageRepository } from '../repositories/messageRepository';
 import { MessageWithSender } from '../types';
@@ -9,6 +11,15 @@ import { validateMessageContent } from '../utils/messageValidation';
 
 const MAX_GROUP_MEMBERS = 100;
 const MAX_GROUP_NAME_LENGTH = 120;
+const CHAT_IMAGE_PATH_RE = /^\/uploads\/[A-Za-z0-9._-]+$/;
+
+function resolveUploadsFile(imageUrl: string, uploadsDir?: string): string | null {
+  if (!CHAT_IMAGE_PATH_RE.test(imageUrl)) return null;
+  const baseDir = uploadsDir ?? path.join(process.cwd(), 'uploads');
+  const filePath = path.join(baseDir, path.basename(imageUrl));
+  if (!fs.existsSync(filePath)) return null;
+  return filePath;
+}
 
 export interface SendMessageResult {
   success: boolean;
@@ -31,17 +42,20 @@ export class ChatService {
     clientMessageId: string;
     soundTokId?: string | null;
     replyToId?: string | null;
+    imageUrl?: string | null;
+    uploadsDir?: string;
   }): Promise<SendMessageResult> {
     try {
       const hasSoundTok = !!data.soundTokId;
+      const hasImage = !!data.imageUrl;
       const validation = validateMessageContent(data.content, {
-        allowEmpty: hasSoundTok,
+        allowEmpty: hasSoundTok || hasImage,
       });
       if (!validation.valid || validation.content === undefined) {
         return { success: false, error: validation.error || 'Invalid message' };
       }
 
-      if (!hasSoundTok && !validation.content) {
+      if (!hasSoundTok && !hasImage && !validation.content) {
         return { success: false, error: 'Сообщение не может быть пустым' };
       }
 
@@ -67,6 +81,14 @@ export class ChatService {
           return { success: false, error: 'Сообщение для ответа не найдено' };
         }
         replyToId = replyTarget.id;
+      }
+
+      let imageUrl: string | null = null;
+      if (data.imageUrl) {
+        if (!resolveUploadsFile(data.imageUrl, data.uploadsDir)) {
+          return { success: false, error: 'Изображение не найдено' };
+        }
+        imageUrl = data.imageUrl;
       }
 
       const chatMeta = await chatRepository.getChatMeta(data.chatId);
@@ -110,6 +132,7 @@ export class ChatService {
         clientMessageId: data.clientMessageId,
         soundTokId,
         replyToId,
+        imageUrl,
       });
 
       if (!message) {
@@ -351,6 +374,99 @@ export class ChatService {
     }
 
     return counts;
+  }
+
+  async updateGroupAvatar(
+    chatId: string,
+    userId: string,
+    avatar: string | null
+  ): Promise<{ success: boolean; chat?: ChatWithUsers; error?: string }> {
+    const meta = await chatRepository.getChatMeta(chatId);
+    if (!meta || meta.type !== ChatType.GROUP) {
+      return { success: false, error: 'Группа не найдена' };
+    }
+    const isAdmin = await chatRepository.isGroupAdmin(chatId, userId);
+    if (!isAdmin) {
+      return { success: false, error: 'Только админ может менять фото группы' };
+    }
+    if (avatar !== null && !CHAT_IMAGE_PATH_RE.test(avatar)) {
+      return { success: false, error: 'Некорректный путь к фото' };
+    }
+    const chat = await chatRepository.updateGroupAvatar(chatId, avatar);
+    if (!chat) return { success: false, error: 'Не удалось обновить фото' };
+    return { success: true, chat };
+  }
+
+  async setMemberRole(
+    chatId: string,
+    actorId: string,
+    targetUserId: string,
+    role: 'ADMIN' | 'MEMBER'
+  ): Promise<{ success: boolean; error?: string; userId?: string; role?: ChatMemberRole }> {
+    const meta = await chatRepository.getChatMeta(chatId);
+    if (!meta || meta.type !== ChatType.GROUP) {
+      return { success: false, error: 'Группа не найдена' };
+    }
+    const isAdmin = await chatRepository.isGroupAdmin(chatId, actorId);
+    if (!isAdmin) {
+      return { success: false, error: 'Только админ может менять роли' };
+    }
+    if (targetUserId === meta.creatorId && role !== 'ADMIN') {
+      return { success: false, error: 'Нельзя снять админку с создателя группы' };
+    }
+    if (targetUserId === actorId && role !== 'ADMIN') {
+      const admins = await chatRepository.countAdmins(chatId);
+      if (admins <= 1) {
+        return { success: false, error: 'Нельзя снять админку с последнего админа' };
+      }
+    }
+    const target = await chatRepository.getMembership(chatId, targetUserId);
+    if (!target) {
+      return { success: false, error: 'Участник не найден' };
+    }
+    const updated = await chatRepository.setMemberRole(
+      chatId,
+      targetUserId,
+      role === 'ADMIN' ? ChatMemberRole.ADMIN : ChatMemberRole.MEMBER
+    );
+    if (!updated) return { success: false, error: 'Не удалось изменить роль' };
+    return { success: true, userId: updated.userId, role: updated.role };
+  }
+
+  async removeMember(
+    chatId: string,
+    actorId: string,
+    targetUserId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const meta = await chatRepository.getChatMeta(chatId);
+    if (!meta || meta.type !== ChatType.GROUP) {
+      return { success: false, error: 'Группа не найдена' };
+    }
+    const leavingSelf = actorId === targetUserId;
+    if (!leavingSelf) {
+      const isAdmin = await chatRepository.isGroupAdmin(chatId, actorId);
+      if (!isAdmin) {
+        return { success: false, error: 'Только админ может удалять участников' };
+      }
+    }
+    if (targetUserId === meta.creatorId) {
+      return { success: false, error: 'Нельзя удалить создателя группы' };
+    }
+    const target = await chatRepository.getMembership(chatId, targetUserId);
+    if (!target) {
+      return { success: false, error: 'Участник не найден' };
+    }
+    if (target.role === ChatMemberRole.ADMIN && !leavingSelf) {
+      // admins can remove other admins except creator (already blocked)
+    }
+    if (leavingSelf && target.role === ChatMemberRole.ADMIN) {
+      const admins = await chatRepository.countAdmins(chatId);
+      if (admins <= 1) {
+        return { success: false, error: 'Назначьте другого админа перед выходом' };
+      }
+    }
+    await chatRepository.removeMember(chatId, targetUserId);
+    return { success: true };
   }
 
   private async validateMessageIds(

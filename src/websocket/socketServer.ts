@@ -216,7 +216,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           return;
         }
         const validation = validateMessageContent(data.content, {
-          allowEmpty: !!data.soundTokId,
+          allowEmpty: !!data.soundTokId || !!data.imageUrl,
         });
         if (!validation.valid) {
           callback({
@@ -227,7 +227,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           return;
         }
 
-        if (!data.soundTokId && !validation.content) {
+        if (!data.soundTokId && !data.imageUrl && !validation.content) {
           callback({
             success: false,
             error: 'Сообщение не может быть пустым',
@@ -260,6 +260,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
           clientMessageId,
           soundTokId: data.soundTokId ?? null,
           replyToId: data.replyToId ?? null,
+          imageUrl: typeof data.imageUrl === 'string' ? data.imageUrl : null,
         });
 
         if (!result.success || !result.message) {

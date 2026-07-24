@@ -52,6 +52,11 @@ enum ChatType {
   GROUP
 }
 
+enum ChatMemberRole {
+  MEMBER
+  ADMIN
+}
+
 enum PresetStatus {
   DRAFT
   PUBLISHED
@@ -492,6 +497,7 @@ model Chat {
   id        String   @id @default(cuid())
   type      ChatType @default(DIRECT)
   name      String?
+  avatar    String?
   creatorId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -510,6 +516,7 @@ model Message {
   chatId    String
   soundTokId String?
   replyToId  String?
+  imageUrl  String?
   
   // For deduplication and status tracking
   clientMessageId String?   // ID generated on client to prevent duplicates
@@ -553,17 +560,19 @@ model MessageReaction {
 }
 
 model ChatUser {
-  id         String    @id @default(cuid())
+  id         String         @id @default(cuid())
   userId     String
   chatId     String
+  role       ChatMemberRole @default(MEMBER)
   pinnedAt   DateTime?
   lastReadAt DateTime?
-  createdAt  DateTime  @default(now())
+  createdAt  DateTime       @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
   @@unique([userId, chatId])
+  @@index([chatId, role])
   @@map("chat_users")
 }
 

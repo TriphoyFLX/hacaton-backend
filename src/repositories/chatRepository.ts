@@ -1,4 +1,4 @@
-import { ChatType } from '@prisma/client';
+import { ChatType, ChatMemberRole } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 
 
@@ -54,6 +54,7 @@ export interface ChatWithUsers {
   id: string;
   type: ChatType;
   name?: string | null;
+  avatar?: string | null;
   creatorId?: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -61,6 +62,7 @@ export interface ChatWithUsers {
     id: string;
     userId: string;
     chatId: string;
+    role?: 'MEMBER' | 'ADMIN';
     pinnedAt?: Date | null;
     lastReadAt?: Date | null;
     createdAt: Date;
@@ -173,13 +175,6 @@ export class ChatRepository {
     });
 
     return chat as ChatWithUsers | null;
-  }
-
-  async getChatMeta(chatId: string) {
-    return prisma.chat.findUnique({
-      where: { id: chatId },
-      select: { id: true, type: true, name: true, creatorId: true },
-    });
   }
 
   async isChatMember(chatId: string, userId: string): Promise<boolean> {
@@ -378,7 +373,10 @@ export class ChatRepository {
         name: name.trim(),
         creatorId,
         users: {
-          create: uniqueMembers.map((userId) => ({ userId })),
+          create: uniqueMembers.map((userId) => ({
+            userId,
+            role: userId === creatorId ? ChatMemberRole.ADMIN : ChatMemberRole.MEMBER,
+          })),
         },
       },
       include: {
@@ -387,6 +385,76 @@ export class ChatRepository {
     });
 
     return chat as ChatWithUsers;
+  }
+
+  async getMembership(chatId: string, userId: string) {
+    return prisma.chatUser.findUnique({
+      where: { userId_chatId: { userId, chatId } },
+      select: {
+        id: true,
+        userId: true,
+        chatId: true,
+        role: true,
+        pinnedAt: true,
+        lastReadAt: true,
+        createdAt: true,
+      },
+    });
+  }
+
+  async isGroupAdmin(chatId: string, userId: string): Promise<boolean> {
+    const membership = await this.getMembership(chatId, userId);
+    return membership?.role === ChatMemberRole.ADMIN;
+  }
+
+  async updateGroupAvatar(chatId: string, avatar: string | null): Promise<ChatWithUsers | null> {
+    const chat = await prisma.chat.update({
+      where: { id: chatId },
+      data: { avatar },
+      include: {
+        users: chatUserInclude,
+      },
+    });
+    return chat as ChatWithUsers;
+  }
+
+  async setMemberRole(
+    chatId: string,
+    userId: string,
+    role: ChatMemberRole
+  ): Promise<{ userId: string; role: ChatMemberRole } | null> {
+    const updated = await prisma.chatUser.update({
+      where: { userId_chatId: { userId, chatId } },
+      data: { role },
+      select: { userId: true, role: true },
+    });
+    return updated;
+  }
+
+  async countAdmins(chatId: string): Promise<number> {
+    return prisma.chatUser.count({
+      where: { chatId, role: ChatMemberRole.ADMIN },
+    });
+  }
+
+  async removeMember(chatId: string, userId: string): Promise<boolean> {
+    await prisma.chatUser.delete({
+      where: { userId_chatId: { userId, chatId } },
+    });
+    return true;
+  }
+
+  async getChatMeta(chatId: string) {
+    return prisma.chat.findUnique({
+      where: { id: chatId },
+      select: {
+        id: true,
+        type: true,
+        name: true,
+        avatar: true,
+        creatorId: true,
+      },
+    });
   }
 
   async setChatPinned(chatId: string, userId: string, pinned: boolean): Promise<Date | null> {

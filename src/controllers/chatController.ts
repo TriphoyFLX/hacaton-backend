@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import fs from 'fs';
 import { chatService } from '../services/chatService';
 import { userRepository } from '../repositories/userRepository';
 import { chatRepository } from '../repositories/chatRepository';
@@ -8,6 +9,7 @@ import { validateMessageContent } from '../utils/messageValidation';
 import { checkRateLimit, messageRateLimitKey } from '../utils/rateLimiter';
 import { getIO } from '../websocket/socketServer';
 import { notificationService } from '../services/notificationService';
+import { deleteAvatarFile } from '../utils/profileUtils';
 
 const MESSAGE_RATE_LIMIT = 30;
 const MESSAGE_RATE_WINDOW_MS = 60_000;
@@ -25,12 +27,14 @@ function formatChat(chat: any, currentUserId: string, unreadCount = 0) {
     id: chat.id,
     type: chat.type,
     name: chat.name,
+    avatar: chat.avatar ?? null,
     creatorId: chat.creatorId,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
     unreadCount,
     isPinned: !!currentMembership?.pinnedAt,
     pinnedAt: currentMembership?.pinnedAt ?? null,
+    myRole: currentMembership?.role ?? 'MEMBER',
     memberCount: chat.users.length,
     otherUser: otherUser
       ? {
@@ -44,6 +48,7 @@ function formatChat(chat: any, currentUserId: string, unreadCount = 0) {
       id: cu.id,
       userId: cu.userId,
       chatId: cu.chatId,
+      role: cu.role ?? 'MEMBER',
       pinnedAt: cu.pinnedAt,
       createdAt: cu.createdAt,
       user: {
@@ -267,16 +272,16 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
     }
 
     const { chatId } = req.params;
-    const { content, clientMessageId, receiverId: bodyReceiverId, soundTokId, replyToId } = req.body;
+    const { content, clientMessageId, receiverId: bodyReceiverId, soundTokId, replyToId, imageUrl } = req.body;
 
     const validation = validateMessageContent(content, {
-      allowEmpty: !!soundTokId,
+      allowEmpty: !!soundTokId || !!imageUrl,
     });
     if (!validation.valid) {
       return res.status(400).json({ error: validation.error });
     }
 
-    if (!soundTokId && !validation.content) {
+    if (!soundTokId && !imageUrl && !validation.content) {
       return res.status(400).json({ error: 'Сообщение не может быть пустым' });
     }
     if (clientMessageId !== undefined && (typeof clientMessageId !== 'string' || clientMessageId.length < 1 || clientMessageId.length > 128)) {
@@ -314,6 +319,7 @@ export async function sendMessage(req: AuthenticatedRequest, res: Response) {
       clientMessageId: clientMessageId || `${req.user.id}_${Date.now()}`,
       soundTokId: typeof soundTokId === 'string' ? soundTokId : null,
       replyToId: typeof replyToId === 'string' ? replyToId : null,
+      imageUrl: typeof imageUrl === 'string' ? imageUrl : null,
     });
 
     if (!result.success || !result.message) {
@@ -457,5 +463,131 @@ export async function getAvailableUsers(req: AuthenticatedRequest, res: Response
   } catch (error) {
     console.error('getAvailableUsers error:', error);
     res.status(500).json({ error: 'Failed to search users' });
+  }
+}
+
+export async function uploadChatImage(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId } = req.params;
+    if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
+
+    const isMember = await chatRepository.isChatMember(chatId, req.user.id);
+    if (!isMember) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+      return res.status(403).json({ error: 'Нет доступа к чату' });
+    }
+
+    const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowed.includes(req.file.mimetype)) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+      return res.status(400).json({ error: 'Допустимы JPEG, PNG, GIF, WEBP' });
+    }
+
+    res.json({ imageUrl: `/uploads/${req.file.filename}` });
+  } catch (error) {
+    console.error('uploadChatImage error:', error);
+    res.status(500).json({ error: 'Не удалось загрузить изображение' });
+  }
+}
+
+export async function uploadGroupAvatar(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId } = req.params;
+    if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
+
+    const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowed.includes(req.file.mimetype)) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+      return res.status(400).json({ error: 'Допустимы JPEG, PNG, GIF, WEBP' });
+    }
+
+    const avatarUrl = `/uploads/${req.file.filename}`;
+    const result = await chatService.updateGroupAvatar(chatId, req.user.id, avatarUrl);
+    if (!result.success || !result.chat) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+      return res.status(403).json({ error: result.error || 'Не удалось обновить фото' });
+    }
+
+    const formatted = formatChat(result.chat, req.user.id, 0);
+    getIO()?.to(`chat:${chatId}`).emit('chat:updated', formatted);
+    res.json(formatted);
+  } catch (error) {
+    console.error('uploadGroupAvatar error:', error);
+    res.status(500).json({ error: 'Не удалось обновить фото группы' });
+  }
+}
+
+export async function deleteGroupAvatar(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId } = req.params;
+    const meta = await chatRepository.getChatMeta(chatId);
+    const result = await chatService.updateGroupAvatar(chatId, req.user.id, null);
+    if (!result.success || !result.chat) {
+      return res.status(403).json({ error: result.error || 'Не удалось удалить фото' });
+    }
+    if (meta?.avatar) {
+      deleteAvatarFile(meta.avatar);
+    }
+    const formatted = formatChat(result.chat, req.user.id, 0);
+    getIO()?.to(`chat:${chatId}`).emit('chat:updated', formatted);
+    res.json(formatted);
+  } catch (error) {
+    console.error('deleteGroupAvatar error:', error);
+    res.status(500).json({ error: 'Не удалось удалить фото группы' });
+  }
+}
+
+export async function setGroupMemberRole(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId, userId } = req.params;
+    const role = req.body?.role;
+    if (role !== 'ADMIN' && role !== 'MEMBER') {
+      return res.status(400).json({ error: 'role должен быть ADMIN или MEMBER' });
+    }
+    const result = await chatService.setMemberRole(chatId, req.user.id, userId, role);
+    if (!result.success) {
+      return res.status(403).json({ error: result.error });
+    }
+    const chat = await chatRepository.getChatById(chatId);
+    if (chat) {
+      const formatted = formatChat(chat, req.user.id, 0);
+      getIO()?.to(`chat:${chatId}`).emit('chat:updated', formatted);
+      res.json(formatted);
+      return;
+    }
+    res.json({ userId: result.userId, role: result.role });
+  } catch (error) {
+    console.error('setGroupMemberRole error:', error);
+    res.status(500).json({ error: 'Не удалось изменить роль' });
+  }
+}
+
+export async function removeGroupMember(req: AuthenticatedRequest, res: Response) {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { chatId, userId } = req.params;
+    const result = await chatService.removeMember(chatId, req.user.id, userId);
+    if (!result.success) {
+      return res.status(403).json({ error: result.error });
+    }
+    if (userId === req.user.id) {
+      getIO()?.to(`chat:${chatId}`).emit('chat:member-left', { chatId, userId });
+      return res.json({ success: true, left: true });
+    }
+    const chat = await chatRepository.getChatById(chatId);
+    if (chat) {
+      const formatted = formatChat(chat, req.user.id, 0);
+      getIO()?.to(`chat:${chatId}`).emit('chat:updated', formatted);
+      res.json(formatted);
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('removeGroupMember error:', error);
+    res.status(500).json({ error: 'Не удалось удалить участника' });
   }
 }

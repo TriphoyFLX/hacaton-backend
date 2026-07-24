@@ -71,6 +71,7 @@ function sanitizeMessage(message: MessageWithSender): MessageWithSender {
       content: '',
       soundTokId: null,
       soundTok: null,
+      imageUrl: null,
     };
   }
   if (result.replyTo?.deletedAt) {
@@ -98,6 +99,7 @@ export class MessageRepository {
     clientMessageId?: string;
     soundTokId?: string | null;
     replyToId?: string | null;
+    imageUrl?: string | null;
   }): Promise<MessageWithSender | null> {
     // Check for duplicate message
     if (data.clientMessageId) {
@@ -123,6 +125,7 @@ export class MessageRepository {
         clientMessageId: data.clientMessageId,
         soundTokId: data.soundTokId || null,
         replyToId: data.replyToId || null,
+        imageUrl: data.imageUrl || null,
         status: MessageStatus.SENT,
       },
       include: messageInclude,
@@ -174,7 +177,7 @@ export class MessageRepository {
 
     const updated = await prisma.message.update({
       where: { id: messageId },
-      data: { deletedAt: new Date(), content: '', soundTokId: null, editedAt: null },
+      data: { deletedAt: new Date(), content: '', soundTokId: null, imageUrl: null, editedAt: null },
       include: messageInclude,
     });
     return sanitizeMessage(updated as MessageWithSender);
@@ -188,10 +191,10 @@ export class MessageRepository {
   ): Promise<MessageWithSender | null> {
     const existing = await prisma.message.findFirst({
       where: { id: messageId, chatId, senderId, deletedAt: null },
-      select: { id: true, soundTokId: true },
+      select: { id: true, soundTokId: true, imageUrl: true },
     });
     if (!existing) return null;
-    if (!content && !existing.soundTokId) return null;
+    if (!content && !existing.soundTokId && !existing.imageUrl) return null;
 
     const updated = await prisma.message.update({
       where: { id: messageId },
