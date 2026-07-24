@@ -1465,20 +1465,47 @@ app.post('/api/posts/:id/comments', async (req, res) => {
     if (validation.content.length > 1000) return res.status(400).json({ error: 'Comment is too long' });
     const post = await prisma.post.findUnique({ where: { id: req.params.id }, select: { id: true, authorId: true } });
     if (!post) return res.status(404).json({ error: 'Post not found' });
+
+    let parentId: string | null = null;
+    let replyToAuthorId: string | null = null;
+    const rawParentId = typeof req.body?.parentId === 'string' ? req.body.parentId.trim() : '';
+    if (rawParentId) {
+      const parent = await prisma.postComment.findFirst({
+        where: { id: rawParentId, postId: post.id },
+        select: { id: true, parentId: true, authorId: true },
+      });
+      if (!parent) return res.status(400).json({ error: 'Parent comment not found' });
+      // Flatten to one level under the root comment
+      parentId = parent.parentId || parent.id;
+      replyToAuthorId = parent.authorId;
+    }
+
     const [comment, updated] = await prisma.$transaction([
       prisma.postComment.create({
-        data: { text: validation.content, authorId: userId, postId: post.id },
+        data: {
+          text: validation.content,
+          authorId: userId,
+          postId: post.id,
+          parentId,
+        },
         include: { author: { select: authorPreviewSelect } },
       }),
       prisma.post.update({ where: { id: post.id }, data: { commentsCount: { increment: 1 } }, select: { commentsCount: true } }),
     ]);
-    void notificationService.create({
-      userId: post.authorId,
-      actorId: userId,
-      type: 'COMMENT',
-      entityType: 'post',
-      entityId: post.id,
-    }).catch((error) => console.error('Failed to create comment notification:', error));
+
+    const notifyIds = new Set<string>();
+    if (post.authorId !== userId) notifyIds.add(post.authorId);
+    if (replyToAuthorId && replyToAuthorId !== userId) notifyIds.add(replyToAuthorId);
+    for (const targetId of notifyIds) {
+      void notificationService.create({
+        userId: targetId,
+        actorId: userId,
+        type: 'COMMENT',
+        entityType: 'post',
+        entityId: post.id,
+      }).catch((error) => console.error('Failed to create comment notification:', error));
+    }
+
     res.status(201).json({
       comment: mapCommentWithVotes({ ...comment, likes: 0, dislikes: 0, votes: [] }),
       commentsCount: updated.commentsCount,
@@ -1562,14 +1589,13 @@ app.delete('/api/posts/:postId/comments/:commentId', async (req, res) => {
     if (!comment) return res.status(404).json({ error: 'Comment not found' });
     if (comment.authorId !== userId) return res.status(403).json({ error: 'Access denied' });
 
-    const [, updated] = await prisma.$transaction([
-      prisma.postComment.delete({ where: { id: comment.id } }),
-      prisma.post.update({
-        where: { id: comment.postId },
-        data: { commentsCount: { decrement: 1 } },
-        select: { commentsCount: true },
-      }),
-    ]);
+    const deleteCount = 1 + await prisma.postComment.count({ where: { parentId: comment.id } });
+    await prisma.postComment.delete({ where: { id: comment.id } });
+    const updated = await prisma.post.update({
+      where: { id: comment.postId },
+      data: { commentsCount: { decrement: deleteCount } },
+      select: { commentsCount: true },
+    });
 
     res.json({
       success: true,
@@ -1831,6 +1857,32 @@ app.delete('/api/soundtok/:id/like', async (req, res) => {
   }
 });
 
+app.delete('/api/soundtok/:id', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const soundTok = await prisma.soundTok.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, authorId: true, videoUrl: true },
+    });
+    if (!soundTok) return res.status(404).json({ error: 'SoundTok not found' });
+    if (soundTok.authorId !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    await prisma.soundTok.delete({ where: { id: soundTok.id } });
+
+    if (soundTok.videoUrl?.startsWith('/uploads/')) {
+      const filePath = path.join(uploadsDir, path.basename(soundTok.videoUrl));
+      void fs.promises.unlink(filePath).catch(() => undefined);
+    }
+
+    res.json({ success: true, id: soundTok.id });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to delete SoundTok' });
+  }
+});
+
 // Get comments for SoundTok
 app.get('/api/soundtok/:id/comments', async (req, res) => {
   try {
@@ -1873,11 +1925,31 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
       return res.status(400).json({ error: 'Comment is too long' });
     }
 
+    const soundTok = await prisma.soundTok.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, authorId: true },
+    });
+    if (!soundTok) return res.status(404).json({ error: 'SoundTok not found' });
+
+    let parentId: string | null = null;
+    let replyToAuthorId: string | null = null;
+    const rawParentId = typeof req.body?.parentId === 'string' ? req.body.parentId.trim() : '';
+    if (rawParentId) {
+      const parent = await prisma.comment.findFirst({
+        where: { id: rawParentId, soundTokId: soundTok.id },
+        select: { id: true, parentId: true, authorId: true },
+      });
+      if (!parent) return res.status(400).json({ error: 'Parent comment not found' });
+      parentId = parent.parentId || parent.id;
+      replyToAuthorId = parent.authorId;
+    }
+
     const comment = await prisma.comment.create({
       data: {
         text: validation.content,
         authorId: userId,
-        soundTokId: req.params.id
+        soundTokId: soundTok.id,
+        parentId,
       },
       include: {
         author: { select: authorPreviewSelect },
@@ -1885,7 +1957,7 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
     });
 
     const updated = await prisma.soundTok.update({
-      where: { id: req.params.id },
+      where: { id: soundTok.id },
       data: {
         commentsCount: {
           increment: 1
@@ -1894,13 +1966,19 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
       select: { id: true, authorId: true, commentsCount: true }
     });
 
-    void notificationService.create({
-      userId: updated.authorId,
-      actorId: userId,
-      type: 'COMMENT',
-      entityType: 'soundtok',
-      entityId: updated.id,
-    }).catch((error) => console.error('Failed to create SoundTok comment notification:', error));
+    const notifyIds = new Set<string>();
+    if (updated.authorId !== userId) notifyIds.add(updated.authorId);
+    if (replyToAuthorId && replyToAuthorId !== userId) notifyIds.add(replyToAuthorId);
+    for (const targetId of notifyIds) {
+      void notificationService.create({
+        userId: targetId,
+        actorId: userId,
+        type: 'COMMENT',
+        entityType: 'soundtok',
+        entityId: updated.id,
+      }).catch((error) => console.error('Failed to create SoundTok comment notification:', error));
+    }
+
     res.status(201).json({
       comment: mapCommentWithVotes({ ...comment, likes: 0, dislikes: 0, votes: [] }),
       commentsCount: updated.commentsCount,
@@ -1908,6 +1986,37 @@ app.post('/api/soundtok/:id/comments', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Failed to create comment' });
+  }
+});
+
+app.delete('/api/soundtok/:soundTokId/comments/:commentId', async (req, res) => {
+  try {
+    const userId = getUserFromToken(req.headers.authorization);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const comment = await prisma.comment.findFirst({
+      where: { id: req.params.commentId, soundTokId: req.params.soundTokId },
+      select: { id: true, authorId: true, soundTokId: true },
+    });
+    if (!comment) return res.status(404).json({ error: 'Comment not found' });
+    if (comment.authorId !== userId) return res.status(403).json({ error: 'Access denied' });
+
+    const deleteCount = 1 + await prisma.comment.count({ where: { parentId: comment.id } });
+    await prisma.comment.delete({ where: { id: comment.id } });
+    const updated = await prisma.soundTok.update({
+      where: { id: comment.soundTokId },
+      data: { commentsCount: { decrement: deleteCount } },
+      select: { commentsCount: true },
+    });
+
+    res.json({
+      success: true,
+      id: comment.id,
+      commentsCount: Math.max(0, updated.commentsCount),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Failed to delete comment' });
   }
 });
 

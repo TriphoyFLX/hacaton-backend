@@ -316,16 +316,20 @@ model PostComment {
   text      String   @db.Text
   authorId  String
   postId    String
+  parentId  String?
   likes     Int      @default(0)
   dislikes  Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
-  votes  PostCommentVote[]
+  author  User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  post    Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  parent  PostComment? @relation("PostCommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies PostComment[] @relation("PostCommentReplies")
+  votes   PostCommentVote[]
 
   @@index([postId, createdAt])
+  @@index([parentId])
   @@map("post_comments")
 }
 
@@ -392,19 +396,23 @@ model SoundTok {
 }
 
 model Comment {
-  id        String   @id @default(cuid())
-  text      String
-  authorId  String
+  id         String   @id @default(cuid())
+  text       String
+  authorId   String
   soundTokId String
-  likes     Int      @default(0)
-  dislikes  Int      @default(0)
-  createdAt DateTime @default(now())
+  parentId   String?
+  likes      Int      @default(0)
+  dislikes   Int      @default(0)
+  createdAt  DateTime @default(now())
 
-  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  soundTok  SoundTok @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  soundTok  SoundTok  @relation(fields: [soundTokId], references: [id], onDelete: Cascade)
+  parent    Comment?  @relation("SoundTokCommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[] @relation("SoundTokCommentReplies")
   votes     CommentVote[]
 
   @@index([soundTokId, createdAt])
+  @@index([parentId])
   @@map("comments")
 }
 
